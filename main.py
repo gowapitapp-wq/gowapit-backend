@@ -49,14 +49,17 @@ security = HTTPBearer() # Skema keamanan untuk membaca token "Bearer" dari Flutt
 
 models.Base.metadata.create_all(bind=engine)
 
-# Auto Migration Kolom Database jika belum ada
-try:
-    with engine.connect() as conn:
-        from sqlalchemy import text
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS foto_profil TEXT;"))
-        conn.commit()
-except Exception as _e:
-    pass
+# Auto Migration Kolom Database (Kompatibel SQLite & Postgres)
+def run_db_migrations():
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE users ADD COLUMN foto_profil TEXT"))
+            conn.commit()
+    except Exception:
+        pass
+
+run_db_migrations()
 
 app = FastAPI(title="GoWapit API")
 
