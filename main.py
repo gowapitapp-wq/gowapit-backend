@@ -8,25 +8,32 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import midtransclient
-from passlib.context import CryptContext
-
 import models
 from database import engine, SessionLocal
 
-# --- SETUP HASHING PASSWORD ---
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+import bcrypt
 
+# --- SETUP HASHING PASSWORD ---
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    if not hashed_password or not isinstance(hashed_password, str):
+        return False
     # Dukungan fallback kompatibilitas jika pengguna terdaftar dengan password plain text
     if not hashed_password.startswith("$2b$") and not hashed_password.startswith("$2a$"):
         return plain_password == hashed_password
     try:
-        return pwd_context.verify(plain_password, hashed_password)
+        pwd_bytes = plain_password.encode('utf-8')
+        if len(pwd_bytes) > 72:
+            pwd_bytes = pwd_bytes[:72]
+        return bcrypt.checkpw(pwd_bytes, hashed_password.encode('utf-8'))
     except Exception:
         return plain_password == hashed_password
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    pwd_bytes = password.encode('utf-8')
+    if len(pwd_bytes) > 72:
+        pwd_bytes = pwd_bytes[:72]
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
 
 # --- SETUP JWT SECRET (Kunci Rahasia) ---
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "RAHASIA_WAPIT_KITA")
