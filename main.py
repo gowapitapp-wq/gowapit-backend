@@ -17,16 +17,23 @@ import bcrypt
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     if not hashed_password or not isinstance(hashed_password, str):
         return False
-    # Dukungan fallback kompatibilitas jika pengguna terdaftar dengan password plain text
-    if not hashed_password.startswith("$2b$") and not hashed_password.startswith("$2a$"):
-        return plain_password == hashed_password
+    if hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$") or hashed_password.startswith("$2y$"):
+        try:
+            pwd_bytes = plain_password.encode('utf-8')
+            if len(pwd_bytes) > 72:
+                pwd_bytes = pwd_bytes[:72]
+            return bcrypt.checkpw(pwd_bytes, hashed_password.encode('utf-8'))
+        except Exception:
+            return plain_password == hashed_password
+    if plain_password == hashed_password:
+        return True
     try:
-        pwd_bytes = plain_password.encode('utf-8')
-        if len(pwd_bytes) > 72:
-            pwd_bytes = pwd_bytes[:72]
-        return bcrypt.checkpw(pwd_bytes, hashed_password.encode('utf-8'))
+        from passlib.hash import pbkdf2_sha256
+        if hashed_password.startswith("$pbkdf2"):
+            return pbkdf2_sha256.verify(plain_password, hashed_password)
     except Exception:
-        return plain_password == hashed_password
+        pass
+    return False
 
 def get_password_hash(password: str) -> str:
     pwd_bytes = password.encode('utf-8')
@@ -41,6 +48,16 @@ ALGORITHM = "HS256"
 security = HTTPBearer() # Skema keamanan untuk membaca token "Bearer" dari Flutter
 
 models.Base.metadata.create_all(bind=engine)
+
+# Auto Migration Kolom Database jika belum ada
+try:
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS foto_profil TEXT;"))
+        conn.commit()
+except Exception as _e:
+    pass
+
 app = FastAPI(title="GoWapit API")
 
 app.add_middleware(
