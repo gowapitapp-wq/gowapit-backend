@@ -289,11 +289,40 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="User tidak ditemukan")
     return user
 
+class UpdateProfileRequest(BaseModel):
+    nama_lengkap: str = None
+    foto_profil: str = None
+
 @app.get("/api/users/me")
 def get_user_profile(current_user: models.UserModel = Depends(get_current_user)):
     return {
         "email": current_user.email,
-        "nama_lengkap": current_user.nama_lengkap
+        "nama_lengkap": current_user.nama_lengkap,
+        "foto_profil": current_user.foto_profil or ""
+    }
+
+@app.put("/api/users/me")
+def update_user_profile(
+    update_data: UpdateProfileRequest, 
+    current_user: models.UserModel = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    if update_data.nama_lengkap:
+        current_user.nama_lengkap = update_data.nama_lengkap
+    if update_data.foto_profil is not None:
+        current_user.foto_profil = update_data.foto_profil
+    
+    db.commit()
+    db.refresh(current_user)
+    
+    return {
+        "status": "success",
+        "message": "Profil berhasil diperbarui!",
+        "user": {
+            "email": current_user.email,
+            "nama_lengkap": current_user.nama_lengkap,
+            "foto_profil": current_user.foto_profil or ""
+        }
     }
 
 @app.get("/api/paket")

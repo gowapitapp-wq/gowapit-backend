@@ -7,6 +7,7 @@ class UserModel(Base):
     nama_lengkap = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     password = Column(String, nullable=False)
+    foto_profil = Column(Text, nullable=True)
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"
