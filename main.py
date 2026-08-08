@@ -1,18 +1,35 @@
+import os
+from datetime import datetime, timedelta, timezone
+import uuid
+import jwt
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-import jwt
-from datetime import datetime, timedelta, timezone
-import models
-from database import engine, SessionLocal
 from pydantic import BaseModel
 import midtransclient
-import midtransclient
-import uuid
+from passlib.context import CryptContext
+
+import models
+from database import engine, SessionLocal
+
+# --- SETUP HASHING PASSWORD ---
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    # Dukungan fallback kompatibilitas jika pengguna terdaftar dengan password plain text
+    if not hashed_password.startswith("$2b$") and not hashed_password.startswith("$2a$"):
+        return plain_password == hashed_password
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception:
+        return plain_password == hashed_password
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
 
 # --- SETUP JWT SECRET (Kunci Rahasia) ---
-SECRET_KEY = "RAHASIA_WAPIT_KITA"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "RAHASIA_WAPIT_KITA")
 ALGORITHM = "HS256"
 security = HTTPBearer() # Skema keamanan untuk membaca token "Bearer" dari Flutter
 
@@ -38,8 +55,7 @@ def get_db():
 def seeder_awal():
     db = SessionLocal()
     
-    # 1. Seeder Destinasi (DIPERBARUI)
-   # 1. Seeder Destinasi (DIPERBARUI)
+    # 1. Seeder Destinasi
     if db.query(models.DestinasiModel).count() == 0:
         db.add_all([
             models.DestinasiModel(
@@ -106,7 +122,7 @@ def seeder_awal():
     # 3. Seeder Layanan Umum
     if db.query(models.LayananUmumModel).count() == 0:
         db.add_all([
-            models.LayananUmumModel(nama_layanan="Pemadam Kebakaran", kontak="(0239)4901790"),
+            models.LayananUmumModel(nama_layanan="Pemadam Kebakaran", kontak="(0293)4901790"),
             models.LayananUmumModel(nama_layanan="Ambulance", kontak="(0293)491119"),
             models.LayananUmumModel(nama_layanan="Polres Temanggung", kontak="(0293)491110"),
         ])
@@ -116,7 +132,6 @@ def seeder_awal():
     if db.query(models.KulinerModel).count() == 0:
         # Data Coffe Chocolatte
         menu_chocolatte = [
-            # Coffe
             {"kategori": "Coffe", "nama": "Cappucino", "harga": 15000},
             {"kategori": "Coffe", "nama": "Maccachino", "harga": 15000},
             {"kategori": "Coffe", "nama": "Latte", "harga": 15000},
@@ -130,12 +145,10 @@ def seeder_awal():
             {"kategori": "Coffe", "nama": "Machiato", "harga": 15000},
             {"kategori": "Coffe", "nama": "Vanilla Latte", "harga": 15000},
             {"kategori": "Coffe", "nama": "Casscarasu", "harga": 15000},
-            # Coklat
             {"kategori": "Coklat", "nama": "Hot Chocolate", "harga": 15000},
             {"kategori": "Coklat", "nama": "Choco Latte", "harga": 15000},
             {"kategori": "Coklat", "nama": "Choco Cheese", "harga": 15000},
             {"kategori": "Coklat", "nama": "Choco Shake", "harga": 15000},
-            # Wappit Mie
             {"kategori": "Wappit Mie", "nama": "Mie Njeplak", "deskripsi": "Mie dengan bubuk cabe", "harga": 15000},
             {"kategori": "Wappit Mie", "nama": "Mie Entah Marah", "deskripsi": "Mie goreng pedas level 123", "harga": 15000},
             {"kategori": "Wappit Mie", "nama": "Mie Goreng Ori", "deskripsi": "Mie goreng original", "harga": 8000},
@@ -144,57 +157,47 @@ def seeder_awal():
             {"kategori": "Wappit Mie", "nama": "Mie Ramen", "deskripsi": "Mie rebus dengan topping ramen", "harga": 15000},
             {"kategori": "Wappit Mie", "nama": "Mie Rebus Ori", "deskripsi": "Mie rebus original", "harga": 8000},
             {"kategori": "Wappit Mie", "nama": "Mie Rebus Isi", "deskripsi": "Mie rebus isi telur/sosis", "harga": 10000},
-            # Wappit RabahGos
             {"kategori": "Wappit RabahGos", "nama": "SONUT (SOsis NUggeT)", "harga": 15000},
             {"kategori": "Wappit RabahGos", "nama": "SOBAKS (SOsis BAKSo)", "harga": 15000},
             {"kategori": "Wappit RabahGos", "nama": "WAPPIT MIX (Sosis nugget bakso)", "harga": 20000},
-            # Kentang
             {"kategori": "Kentang", "nama": "Original", "deskripsi": "Kentang goreng", "harga": 12000},
             {"kategori": "Kentang", "nama": "Cheese and Meat", "deskripsi": "Kentang goreng dengan daging dan saus keju", "harga": 17000},
         ]
         
-        # Data Kedai Hutan (Kopi Spesifik)
         menu_kedaihutan = [
-            # Robusta
             {"kategori": "Coffe", "nama": "Robusta Tubruk", "harga": 8000},
             {"kategori": "Coffe", "nama": "Robusta Americano", "harga": 13000},
             {"kategori": "Coffe", "nama": "Robusta Expresso", "harga": 15000},
             {"kategori": "Coffe", "nama": "Robusta V60", "harga": 15000},
             {"kategori": "Coffe", "nama": "Robusta Vietnamdrip", "harga": 20000},
             {"kategori": "Coffe", "nama": "Robusta Mopakot", "harga": 20000},
-            # Arabika Fullwashed
             {"kategori": "Coffe", "nama": "Arabika Fullwashed Tubruk", "harga": 13000},
             {"kategori": "Coffe", "nama": "Arabika Fullwashed Americano", "harga": 15000},
             {"kategori": "Coffe", "nama": "Arabika Fullwashed Expresso", "harga": 18000},
             {"kategori": "Coffe", "nama": "Arabika Fullwashed V60", "harga": 20000},
             {"kategori": "Coffe", "nama": "Arabika Fullwashed Vietnamdrip", "harga": 25000},
             {"kategori": "Coffe", "nama": "Arabika Fullwashed Mopakot", "harga": 25000},
-            # Arabika Natural
             {"kategori": "Coffe", "nama": "Arabika Natural Tubruk", "harga": 15000},
             {"kategori": "Coffe", "nama": "Arabika Natural Americano", "harga": 18000},
             {"kategori": "Coffe", "nama": "Arabika Natural Expresso", "harga": 20000},
             {"kategori": "Coffe", "nama": "Arabika Natural V60", "harga": 25000},
             {"kategori": "Coffe", "nama": "Arabika Natural Vietnamdrip", "harga": 28000},
             {"kategori": "Coffe", "nama": "Arabika Natural Mopakot", "harga": 28000},
-            # Luwak
             {"kategori": "Coffe", "nama": "Luwak Tubruk", "harga": 25000},
             {"kategori": "Coffe", "nama": "Luwak Americano", "harga": 28000},
             {"kategori": "Coffe", "nama": "Luwak Expresso", "harga": 30000},
             {"kategori": "Coffe", "nama": "Luwak V60", "harga": 30000},
             {"kategori": "Coffe", "nama": "Luwak Vietnamdrip", "harga": 30000},
             {"kategori": "Coffe", "nama": "Luwak Mopakot", "harga": 30000},
-            # Blend
             {"kategori": "Coffe", "nama": "Blend Tubruk", "harga": 10000},
             {"kategori": "Coffe", "nama": "Blend Americano", "harga": 13000},
             {"kategori": "Coffe", "nama": "Blend Expresso", "harga": 15000},
             {"kategori": "Coffe", "nama": "Blend V60", "harga": 20000},
             {"kategori": "Coffe", "nama": "Blend Vietnamdrip", "harga": 20000},
             {"kategori": "Coffe", "nama": "Blend Mopakot", "harga": 20000},
-            # Tambahan
             {"kategori": "Tambahan", "nama": "+ Ice", "harga": 2000},
         ]
 
-        # Memasukkan ke database
         for m in menu_chocolatte:
             db.add(models.KulinerModel(kedai="Cafe Coffe Chocolatte", kategori=m["kategori"], nama_menu=m["nama"], deskripsi=m.get("deskripsi", ""), harga=m["harga"]))
         for m in menu_kedaihutan:
@@ -204,6 +207,10 @@ def seeder_awal():
     
     db.close()
 
+@app.get("/")
+def read_root():
+    return {"status": "success", "message": "Selamat datang di GoWapit API!"}
+
 @app.get("/api/destinasi")
 def get_destinasi(db: Session = Depends(get_db)):
     wisata = db.query(models.DestinasiModel).all()
@@ -211,42 +218,46 @@ def get_destinasi(db: Session = Depends(get_db)):
 
 @app.post("/api/register")
 def register_user(user_data: dict, db: Session = Depends(get_db)):
+    if not user_data.get("email") or not user_data.get("password") or not user_data.get("nama_lengkap"):
+        raise HTTPException(status_code=400, detail="Semua field wajib diisi!")
+
     user_exists = db.query(models.UserModel).filter(models.UserModel.email == user_data["email"]).first()
     if user_exists:
         raise HTTPException(status_code=400, detail="Email sudah digunakan!")
 
+    hashed_pwd = get_password_hash(user_data["password"])
     baru = models.UserModel(
         nama_lengkap=user_data["nama_lengkap"],
         email=user_data["email"],
-        password=user_data["password"]
+        password=hashed_pwd
     )
     db.add(baru)
     db.commit()
     db.refresh(baru)
     return {"status": "success", "message": "Akun berhasil dibuat!", "user_id": baru.id}
 
-# ========================================================
-# UPDATE: Endpoint Login sekarang merilis Token JWT
-# ========================================================
 @app.post("/api/login")
 def login_user(login_data: dict, db: Session = Depends(get_db)):
+    if not login_data.get("email") or not login_data.get("password"):
+        raise HTTPException(status_code=400, detail="Email dan password wajib diisi!")
+
     user = db.query(models.UserModel).filter(models.UserModel.email == login_data["email"]).first()
     
-    if not user or user.password != login_data["password"]:
+    if not user or not verify_password(login_data["password"], user.password):
         raise HTTPException(status_code=400, detail="Email atau password salah!")
     
-    # 1. Buat masa berlaku token (misal: aktif 7 hari)
+    # 1. Buat masa berlaku token (aktif 7 hari)
     expire = datetime.now(timezone.utc) + timedelta(days=7)
     
     # 2. Bungkus email user dan waktu expired ke dalam token
     to_encode = {"sub": user.email, "exp": expire}
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     
-    # 3. Kirim kembali access_token ke Flutter agar bisa disimpan
+    # 3. Kirim kembali access_token ke Flutter
     return {
         "status": "success", 
         "message": "Login berhasil!", 
-        "access_token": encoded_jwt, # <--- INI KUNCI PENTINGNYA
+        "access_token": encoded_jwt,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -255,15 +266,10 @@ def login_user(login_data: dict, db: Session = Depends(get_db)):
         }
     }
 
-# ========================================================
-# FITUR BARU: Penjaga Pintu & Ambil Profil
-# ========================================================
-
-# Fungsi untuk mengekstrak dan memvalidasi token JWT
+# Fungsi/middleware untuk memvalidasi token JWT
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
     token = credentials.credentials
     try:
-        # Buka gembok tokennya
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         if email is None:
@@ -271,13 +277,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception:
         raise HTTPException(status_code=401, detail="Token tidak valid atau kedaluwarsa")
     
-    # Cari user di database
     user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
     if user is None:
         raise HTTPException(status_code=401, detail="User tidak ditemukan")
     return user
 
-# Endpoint untuk mengambil data diri (profil)
 @app.get("/api/users/me")
 def get_user_profile(current_user: models.UserModel = Depends(get_current_user)):
     return {
@@ -292,7 +296,6 @@ def get_paket(db: Session = Depends(get_db)):
 
 @app.get("/api/kuliner")
 def get_kuliner(kedai: str = None, db: Session = Depends(get_db)):
-    # Bisa filter berdasarkan kedai (contoh: /api/kuliner?kedai=Kedai Hutan)
     query = db.query(models.KulinerModel)
     if kedai:
         query = query.filter(models.KulinerModel.kedai == kedai)
@@ -304,16 +307,13 @@ def get_layanan(db: Session = Depends(get_db)):
     data_layanan = db.query(models.LayananUmumModel).all()
     return {"status": "success", "data": data_layanan}
 
-# ========================================================
-# KONFIGURASI MIDTRANS & ENDPOINT CHECKOUT
-# ========================================================
+# --- KONFIGURASI MIDTRANS & ENDPOINT CHECKOUT ---
+MIDTRANS_SERVER_KEY = os.getenv("MIDTRANS_SERVER_KEY", "SB-Mid-server-kunci-sementara")
 snap = midtransclient.Snap(
     is_production=False,
-    import os
-    server_key = os.getenv("MIDTRANS_SERVER_KEY", "kunci_sementara")
+    server_key=MIDTRANS_SERVER_KEY
 )
 
-# 1. Buat cetakan/skema data (Pydantic) untuk menerima JSON dari Flutter
 class CustomerDetail(BaseModel):
     first_name: str
     email: str
@@ -323,11 +323,9 @@ class CheckoutRequest(BaseModel):
     gross_amount: int
     customer_details: CustomerDetail
 
-# 2. Endpoint Checkout versi murni FastAPI
 @app.post("/api/checkout")
 def checkout(request_data: CheckoutRequest):
     try:
-        # Susun parameter sesuai format Midtrans
         param = {
             "transaction_details": {
                 "order_id": request_data.order_id,
@@ -339,11 +337,8 @@ def checkout(request_data: CheckoutRequest):
             },
         }
         
-        # Eksekusi transaksi ke Midtrans
         transaction = snap.create_transaction(param)
-        
-        # FastAPI otomatis mengubah dictionary return menjadi JSON
         return {"status": "success", "redirect_url": transaction['redirect_url']}
     
-    except Exception as e: # Typo "Expection" sudah diperbaiki
-        raise HTTPException(status_code=500, detail=str(e))    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
