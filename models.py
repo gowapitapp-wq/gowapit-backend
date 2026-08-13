@@ -8,6 +8,7 @@ class UserModel(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password = Column(String, nullable=False)
     foto_profil = Column(Text, nullable=True)
+    google_sub = Column(String, nullable=True)
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"

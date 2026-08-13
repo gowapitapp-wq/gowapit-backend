@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 import uuid
 import jwt
+import requests
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -55,6 +56,13 @@ def run_db_migrations():
         with engine.connect() as conn:
             from sqlalchemy import text
             conn.execute(text("ALTER TABLE users ADD COLUMN foto_profil TEXT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE users ADD COLUMN google_sub TEXT"))
             conn.commit()
     except Exception:
         pass
@@ -284,6 +292,73 @@ def login_user(login_data: dict, db: Session = Depends(get_db)):
     return {
         "status": "success", 
         "message": "Login berhasil!", 
+        "access_token": encoded_jwt,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "nama_lengkap": user.nama_lengkap,
+            "email": user.email
+        }
+    }
+
+@app.post("/api/auth/google")
+def google_auth(data: dict, db: Session = Depends(get_db)):
+    id_token = data.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=400, detail="Token ID Google wajib diisi!")
+
+    try:
+        resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}", timeout=10)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=400, detail="Token Google tidak valid atau sudah kedaluwarsa!")
+        token_info = resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal memverifikasi token Google: {str(e)}")
+
+    if "error_description" in token_info:
+        raise HTTPException(status_code=400, detail="Token Google tidak valid!")
+
+    google_sub = token_info.get("sub")
+    email = token_info.get("email")
+
+    if not google_sub or not email:
+        raise HTTPException(status_code=400, detail="Data profil Google tidak lengkap (email/sub hilang).")
+
+    nama_lengkap = token_info.get("name") or email.split("@")[0]
+
+    # 1. Cari user berdasarkan google_sub
+    user = db.query(models.UserModel).filter(models.UserModel.google_sub == google_sub).first()
+
+    # 2. Jika belum ada, cari berdasarkan email lalu tautkan google_sub
+    if not user:
+        user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+        if user:
+            user.google_sub = google_sub
+            db.commit()
+            db.refresh(user)
+
+    # 3. Jika tetap belum ada, buat user baru
+    if not user:
+        random_pwd = get_password_hash(uuid.uuid4().hex)
+        user = models.UserModel(
+            nama_lengkap=nama_lengkap,
+            email=email,
+            password=random_pwd,
+            google_sub=google_sub
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    expire = datetime.now(timezone.utc) + timedelta(days=7)
+    to_encode = {"sub": user.email, "exp": expire}
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+    return {
+        "status": "success",
+        "message": "Login Google berhasil!",
         "access_token": encoded_jwt,
         "token_type": "bearer",
         "user": {
