@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Text
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
 from database import Base
 
 class UserModel(Base):
@@ -9,6 +11,8 @@ class UserModel(Base):
     password = Column(String, nullable=False)
     foto_profil = Column(Text, nullable=True)
     google_sub = Column(String, nullable=True)
+    facebook_id = Column(String, nullable=True)
+    role = Column(String, default="user")
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"
@@ -25,6 +29,23 @@ class DestinasiModel(Base):
     # Jarak dan ketinggian bisa dibiarkan atau dihapus jika sudah tidak dipakai
     jarak = Column(String, nullable=True) 
     ketinggian = Column(String, nullable=True)
+
+class UlasanModel(Base):
+    __tablename__ = "ulasan"
+    id = Column(Integer, primary_key=True, index=True)
+    destinasi_id = Column(Integer, ForeignKey("destinasi.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    rating = Column(Integer, nullable=False)  # 1 - 5
+    ulasan = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('destinasi_id', 'user_id', name='uq_destinasi_user_ulasan'),
+    )
+
+    user = relationship("UserModel", backref="ulasan_list")
+    destinasi = relationship("DestinasiModel", backref="ulasan_list")
 
 class PaketModel(Base):
     __tablename__ = "paket"
@@ -47,3 +68,40 @@ class LayananUmumModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     nama_layanan = Column(String)
     kontak = Column(String)
+
+class VoucherModel(Base):
+    __tablename__ = "voucher"
+    id          = Column(Integer, primary_key=True, index=True)
+    kode        = Column(String, unique=True, index=True, nullable=False)
+    tipe        = Column(String, nullable=False)   # "persen" | "nominal"
+    nilai       = Column(Integer, nullable=False)  # 10 (persen) atau 20000 (nominal)
+    maks_diskon = Column(Integer, nullable=True)   # cap diskon untuk tipe persen
+    kuota       = Column(Integer, default=100)
+    terpakai    = Column(Integer, default=0)
+    aktif       = Column(Integer, default=1)       # 1=aktif, 0=nonaktif
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+class BookingModel(Base):
+    __tablename__ = "booking"
+    id             = Column(Integer, primary_key=True, index=True)
+    user_id        = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    paket_id       = Column(Integer, ForeignKey("paket.id"), nullable=False)
+    tanggal_mulai  = Column(String, nullable=False)   # YYYY-MM-DD
+    tanggal_akhir  = Column(String, nullable=True)    # null untuk Gold/Silver
+    jumlah_orang   = Column(Integer, nullable=False)
+    malam_tambahan = Column(Integer, default=0)
+    voucher_id     = Column(Integer, ForeignKey("voucher.id"), nullable=True)
+    subtotal       = Column(Integer, nullable=False)
+    diskon         = Column(Integer, default=0)
+    total_harga    = Column(Integer, nullable=False)
+    status         = Column(String, default="PENDING")  # PENDING|PAID|REDEEMED|CANCELLED|EXPIRED
+    order_id       = Column(String, nullable=True)
+    ticket_code    = Column(String, unique=True, index=True, nullable=True)
+    redeemed_at    = Column(DateTime, nullable=True)
+    redeemed_by    = Column(String, nullable=True)
+    expires_at     = Column(DateTime, nullable=True)
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+    user    = relationship("UserModel", backref="bookings")
+    paket   = relationship("PaketModel", backref="bookings")
+    voucher = relationship("VoucherModel", backref="bookings")
