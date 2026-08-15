@@ -37,6 +37,7 @@ class UlasanModel(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     rating = Column(Integer, nullable=False)  # 1 - 5
     ulasan = Column(Text, nullable=True)
+    foto = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

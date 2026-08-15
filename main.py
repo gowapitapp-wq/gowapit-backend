@@ -106,6 +106,13 @@ def run_db_migrations():
     try:
         with engine.connect() as conn:
             from sqlalchemy import text
+            conn.execute(text("ALTER TABLE ulasan ADD COLUMN foto TEXT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
             conn.execute(text("UPDATE booking SET ticket_code = order_id WHERE ticket_code IS NULL AND order_id IS NOT NULL"))
             conn.commit()
     except Exception:
@@ -632,6 +639,7 @@ def get_optional_current_user(request: Request, db: Session = Depends(get_db)) -
 class UlasanRequest(BaseModel):
     rating: int
     ulasan: Optional[str] = ""
+    foto: Optional[str] = None
 
 # --- ENDPOINTS ULASAN DESTINASI ---
 @app.get("/api/destinasi/{destinasi_id}/ulasan")
@@ -661,6 +669,7 @@ def get_ulasan_destinasi(
             "foto_profil": u.user.foto_profil if u.user else None,
             "rating": u.rating,
             "ulasan": u.ulasan or "",
+            "foto": u.foto or None,
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "updated_at": u.updated_at.isoformat() if u.updated_at else None,
             "milik_saya": (curr_user_id is not None and u.user_id == curr_user_id)
@@ -689,6 +698,7 @@ def create_or_update_ulasan(
     if existing:
         existing.rating = ulasan_in.rating
         existing.ulasan = ulasan_in.ulasan
+        existing.foto = ulasan_in.foto
         existing.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(existing)
@@ -700,6 +710,7 @@ def create_or_update_ulasan(
                 "destinasi_id": existing.destinasi_id,
                 "rating": existing.rating,
                 "ulasan": existing.ulasan,
+                "foto": existing.foto,
                 "created_at": existing.created_at.isoformat() if existing.created_at else None,
                 "updated_at": existing.updated_at.isoformat() if existing.updated_at else None
             }
@@ -709,7 +720,8 @@ def create_or_update_ulasan(
             destinasi_id=destinasi_id,
             user_id=current_user.id,
             rating=ulasan_in.rating,
-            ulasan=ulasan_in.ulasan
+            ulasan=ulasan_in.ulasan,
+            foto=ulasan_in.foto
         )
         db.add(baru)
         db.commit()
@@ -722,6 +734,7 @@ def create_or_update_ulasan(
                 "destinasi_id": baru.destinasi_id,
                 "rating": baru.rating,
                 "ulasan": baru.ulasan,
+                "foto": baru.foto,
                 "created_at": baru.created_at.isoformat() if baru.created_at else None,
                 "updated_at": baru.updated_at.isoformat() if baru.updated_at else None
             }
@@ -747,6 +760,7 @@ def update_ulasan(
 
     existing.rating = ulasan_in.rating
     existing.ulasan = ulasan_in.ulasan
+    existing.foto = ulasan_in.foto
     existing.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(existing)
@@ -757,7 +771,8 @@ def update_ulasan(
             "id": existing.id,
             "destinasi_id": existing.destinasi_id,
             "rating": existing.rating,
-            "ulasan": existing.ulasan
+            "ulasan": existing.ulasan,
+            "foto": existing.foto
         }
     }
 
