@@ -922,10 +922,10 @@ def get_env_flexible(key: str, default: str = "") -> str:
 def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str) -> dict:
     admin_email = get_env_flexible("ADMIN_EMAIL", "panoclassroom@gmail.com").strip()
     resend_api_key = get_env_flexible("RESEND_API_KEY", "").strip()
-    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", "")).strip()
+    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", "c21159d8-8a23-4ea9-ad82-07706a49dc35")).strip()
     brevo_api_key = get_env_flexible("BREVO_API_KEY", "").strip()
 
-    subject = f"🔔 Pesan Baru dari Pengunjung Go Wapit: {nama}"
+    subject = f"Pesan Baru dari Pengunjung Go Wapit: {nama}"
 
     plain_text = f"""
 Pesan Baru dari Pengunjung Go Wapit
@@ -987,7 +987,36 @@ Email otomatis dari Go Wapit (Umbul Jumprit, Temanggung)
     </html>
     """
 
-    # --- METODE 1: RESEND API (HTTPS Port 443 - Terbaik & Paling Stabil di Cloud) ---
+    # --- METODE 1: WEB3FORMS API (HTTPS Port 443) ---
+    if web3forms_key:
+        try:
+            res = requests.post(
+                "https://api.web3forms.com/submit",
+                data={
+                    "access_key": web3forms_key,
+                    "subject": subject,
+                    "from_name": f"Go Wapit - {nama}",
+                    "name": nama,
+                    "email": email_pengirim,
+                    "message": f"Nama: {nama}\nEmail: {email_pengirim}\n\nIsi Pesan:\n{isi_pesan}\n\nWaktu: {datetime.now().strftime('%d %B %Y, %H:%M WIB')}"
+                },
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+                    "Origin": "https://gowapit.app",
+                    "Referer": "https://gowapit.app/"
+                },
+                timeout=12
+            )
+            if res.status_code == 200:
+                msg_ok = f"[Web3Forms Success] Email berhasil dikirim via Web3Forms API ke {admin_email}."
+                print(msg_ok)
+                return {"sent": True, "provider": "Web3Forms HTTPS API", "destination": admin_email, "message": msg_ok}
+            else:
+                print(f"[Web3Forms Error] Status {res.status_code}: {res.text[:150]}")
+        except Exception as e:
+            print(f"[Web3Forms Exception] {e}")
+
+    # --- METODE 2: RESEND API (HTTPS Port 443) ---
     if resend_api_key:
         try:
             res = requests.post(
@@ -1014,28 +1043,6 @@ Email otomatis dari Go Wapit (Umbul Jumprit, Temanggung)
                 print(f"[Resend Error] Status {res.status_code}: {res.text}")
         except Exception as e:
             print(f"[Resend Exception] {e}")
-
-    # --- METODE 2: WEB3FORMS API (HTTPS Port 443) ---
-    if web3forms_key:
-        try:
-            res = requests.post(
-                "https://api.web3forms.com/submit",
-                json={
-                    "access_key": web3forms_key,
-                    "subject": subject,
-                    "from_name": f"Go Wapit - {nama}",
-                    "name": nama,
-                    "email": email_pengirim,
-                    "message": isi_pesan
-                },
-                timeout=10
-            )
-            if res.status_code == 200:
-                msg_ok = f"[Web3Forms Success] Email berhasil dikirim via Web3Forms API ke {admin_email}."
-                print(msg_ok)
-                return {"sent": True, "provider": "Web3Forms HTTPS API", "destination": admin_email, "message": msg_ok}
-        except Exception as e:
-            print(f"[Web3Forms Exception] {e}")
 
     # --- METODE 3: BREVO API (HTTPS Port 443) ---
     if brevo_api_key:
