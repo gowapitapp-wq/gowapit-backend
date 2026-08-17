@@ -106,4 +106,12 @@ class BookingModel(Base):
 
     user    = relationship("UserModel", backref="bookings")
     paket   = relationship("PaketModel", backref="bookings")
-    voucher = relationship("VoucherModel", backref="bookings")
+    voucher = relationship("VoucherModel", backref="bookings")
+
+class PesanModel(Base):
+    __tablename__ = "pesan"
+    id = Column(Integer, primary_key=True, index=True)
+    nama = Column(String, nullable=False)
+    email = Column(String, nullable=False)
+    isi_pesan = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

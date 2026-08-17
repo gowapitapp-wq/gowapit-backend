@@ -1,4 +1,7 @@
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone, date as date_type
 from typing import Optional
 import uuid
@@ -163,6 +166,21 @@ def run_db_migrations():
             conn.execute(text(
                 "UPDATE layanan_umum SET nama_layanan = 'Polsek Ngadirejo', kontak = '(0293) 596220', deskripsi = 'Unit pelaksana kepolisian di tingkat kecamatan yang menjaga keamanan, ketertiban masyarakat, dan perlindungan hukum di wilayah Kecamatan Ngadirejo. Lokasi: Jl. Raya Candiroto No.1, Dandu, Manggong, Kec. Ngadirejo, Kab. Temanggung. Jam Operasional: 24 Jam' WHERE nama_layanan LIKE '%Polres%' OR nama_layanan LIKE '%Polsek%'"
             ))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS pesan (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nama VARCHAR NOT NULL,
+                    email VARCHAR NOT NULL,
+                    isi_pesan TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
             conn.commit()
     except Exception:
         pass
@@ -890,6 +908,116 @@ def get_kuliner(kedai: str = None, db: Session = Depends(get_db)):
 def get_layanan(db: Session = Depends(get_db)):
     data_layanan = db.query(models.LayananUmumModel).all()
     return {"status": "success", "data": data_layanan}
+
+# --- KONFIGURASI SMTP EMAIL (HUBUNGI KAMI) ---
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "gowapit.official@gmail.com")
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", SMTP_EMAIL)
+
+def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str):
+    if not SMTP_APP_PASSWORD:
+        print("[SMTP Info] SMTP_APP_PASSWORD belum diatur. Pesan tersimpan di database tanpa pengiriman email.")
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"🔔 Pesan Baru dari Pengunjung Go Wapit: {nama}"
+        msg["From"] = SMTP_EMAIL
+        msg["To"] = ADMIN_EMAIL
+        msg["Reply-To"] = email_pengirim
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 20px; }}
+                .container {{ background-color: #ffffff; padding: 24px; border-radius: 12px; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; }}
+                .header {{ border-bottom: 2px solid #5E9190; padding-bottom: 12px; margin-bottom: 20px; }}
+                .header h2 {{ color: #5E9190; margin: 0; }}
+                .field {{ margin-bottom: 14px; }}
+                .label {{ font-weight: bold; color: #555555; font-size: 13px; }}
+                .value {{ font-size: 15px; color: #222222; margin-top: 4px; }}
+                .message-box {{ background-color: #f9fbfb; border-left: 4px solid #5E9190; padding: 14px; margin-top: 10px; border-radius: 4px; white-space: pre-wrap; }}
+                .footer {{ margin-top: 24px; font-size: 12px; color: #888888; text-align: center; border-top: 1px solid #eeeeee; padding-top: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🌲 Pesan & Saran Masuk - Go Wapit</h2>
+                </div>
+                <div class="field">
+                    <div class="label">Nama Pengirim:</div>
+                    <div class="value">{nama}</div>
+                </div>
+                <div class="field">
+                    <div class="label">Email Pengirim:</div>
+                    <div class="value"><a href="mailto:{email_pengirim}">{email_pengirim}</a></div>
+                </div>
+                <div class="field">
+                    <div class="label">Waktu Kirim:</div>
+                    <div class="value">{datetime.now().strftime("%d %B %Y, %H:%M WIB")}</div>
+                </div>
+                <div class="field">
+                    <div class="label">Isi Pesan / Kritik & Saran:</div>
+                    <div class="message-box">{isi_pesan}</div>
+                </div>
+                <div class="footer">
+                    Email ini dikirim otomatis oleh sistem backend aplikasi Go Wapit (Umbul Jumprit, Temanggung).
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        msg.attach(MIMEText(html_content, "html"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+        server.starttls()
+        server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
+        server.sendmail(SMTP_EMAIL, ADMIN_EMAIL, msg.as_string())
+        server.quit()
+        print(f"[SMTP Success] Email notifikasi pesan dari {nama} ({email_pengirim}) berhasil dikirim ke {ADMIN_EMAIL}.")
+    except Exception as e:
+        print(f"[SMTP Error] Gagal mengirim email notifikasi: {e}")
+
+class PesanRequest(BaseModel):
+    nama: str
+    email: str
+    isi_pesan: str
+
+@app.post("/api/pesan")
+def kirim_pesan(payload: PesanRequest, db: Session = Depends(get_db)):
+    nama = payload.nama.strip()
+    email = payload.email.strip()
+    isi_pesan = payload.isi_pesan.strip()
+
+    if not nama or not email or not isi_pesan:
+        raise HTTPException(status_code=400, detail="Nama, email, dan isi pesan wajib diisi.")
+
+    pesan_baru = models.PesanModel(
+        nama=nama,
+        email=email,
+        isi_pesan=isi_pesan,
+        created_at=datetime.utcnow()
+    )
+    db.add(pesan_baru)
+    db.commit()
+    db.refresh(pesan_baru)
+
+    # Kirim notifikasi email ke Gmail admin
+    kirim_email_notifikasi_pesan(nama, email, isi_pesan)
+
+    return {
+        "status": "success",
+        "message": "Pesan berhasil dikirim dan tersimpan.",
+        "data": {
+            "id": pesan_baru.id,
+            "nama": pesan_baru.nama,
+            "email": pesan_baru.email,
+            "created_at": str(pesan_baru.created_at)
+        }
+    }
 
 # --- KONFIGURASI MIDTRANS ---
 MIDTRANS_SERVER_KEY = os.getenv("MIDTRANS_SERVER_KEY", "SB-Mid-server-kunci-sementara")
