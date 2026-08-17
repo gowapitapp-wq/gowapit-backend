@@ -7,7 +7,7 @@ from typing import Optional
 import uuid
 import jwt
 import requests
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -909,7 +909,7 @@ def get_layanan(db: Session = Depends(get_db)):
     data_layanan = db.query(models.LayananUmumModel).all()
     return {"status": "success", "data": data_layanan}
 
-# --- KONFIGURASI SMTP EMAIL (HUBUNGI KAMI) ---
+# --- KONFIGURASI PENGIRIMAN EMAIL (HUBUNGI KAMI) ---
 def get_env_flexible(key: str, default: str = "") -> str:
     val = os.getenv(key)
     if val:
@@ -920,26 +920,14 @@ def get_env_flexible(key: str, default: str = "") -> str:
     return default
 
 def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str) -> dict:
-    smtp_email = get_env_flexible("SMTP_EMAIL", "gowapitapp@gmail.com").strip()
-    smtp_app_password = get_env_flexible("SMTP_APP_PASSWORD", "jklzjmnutilkdfqq").replace(" ", "").replace('"', '').replace("'", "").strip()
     admin_email = get_env_flexible("ADMIN_EMAIL", "panoclassroom@gmail.com").strip()
+    resend_api_key = get_env_flexible("RESEND_API_KEY", "").strip()
+    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", "")).strip()
+    brevo_api_key = get_env_flexible("BREVO_API_KEY", "").strip()
 
-    if not smtp_email or not smtp_app_password:
-        msg_info = f"[SMTP Info] SMTP_EMAIL ({smtp_email or 'KOSONG'}) atau SMTP_APP_PASSWORD ({'ADA' if smtp_app_password else 'KOSONG'}) belum lengkap. Pesan disimpan ke database."
-        print(msg_info)
-        return {"sent": False, "reason": "SMTP credentials not configured on server", "detail": msg_info}
+    subject = f"🔔 Pesan Baru dari Pengunjung Go Wapit: {nama}"
 
-    if not admin_email:
-        admin_email = smtp_email
-
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"🔔 Pesan Baru dari Pengunjung Go Wapit: {nama}"
-        msg["From"] = f"Go Wapit Notification <{smtp_email}>"
-        msg["To"] = admin_email
-        msg["Reply-To"] = email_pengirim
-
-        plain_text = f"""
+    plain_text = f"""
 Pesan Baru dari Pengunjung Go Wapit
 
 Nama Pengirim: {nama}
@@ -953,77 +941,165 @@ Isi Pesan / Kritik & Saran:
 Email otomatis dari Go Wapit (Umbul Jumprit, Temanggung)
 """
 
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <style>
-                body {{ font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f6f8; padding: 20px; color: #333; }}
-                .container {{ background-color: #ffffff; padding: 24px; border-radius: 14px; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
-                .header {{ border-bottom: 2px solid #5E9190; padding-bottom: 14px; margin-bottom: 20px; }}
-                .header h2 {{ color: #5E9190; margin: 0; font-size: 20px; }}
-                .field {{ margin-bottom: 14px; }}
-                .label {{ font-weight: bold; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }}
-                .value {{ font-size: 15px; color: #1e293b; margin-top: 4px; font-weight: 500; }}
-                .message-box {{ background-color: #f8fafc; border-left: 4px solid #5E9190; padding: 14px 16px; margin-top: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; color: #334155; }}
-                .footer {{ margin-top: 24px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>🌲 Pesan & Kritik Saran Masuk - Go Wapit</h2>
-                </div>
-                <div class="field">
-                    <div class="label">Nama Pengirim:</div>
-                    <div class="value">{nama}</div>
-                </div>
-                <div class="field">
-                    <div class="label">Email Pengirim:</div>
-                    <div class="value"><a href="mailto:{email_pengirim}" style="color: #5E9190; text-decoration: none;">{email_pengirim}</a></div>
-                </div>
-                <div class="field">
-                    <div class="label">Waktu Kirim:</div>
-                    <div class="value">{datetime.now().strftime("%d %B %Y, %H:%M WIB")}</div>
-                </div>
-                <div class="field">
-                    <div class="label">Isi Pesan / Kritik & Saran:</div>
-                    <div class="message-box">{isi_pesan}</div>
-                </div>
-                <div class="footer">
-                    Email ini dikirim otomatis oleh sistem backend aplikasi Go Wapit (Umbul Jumprit, Temanggung).
-                </div>
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f6f8; padding: 20px; color: #333; }}
+            .container {{ background-color: #ffffff; padding: 24px; border-radius: 14px; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
+            .header {{ border-bottom: 2px solid #5E9190; padding-bottom: 14px; margin-bottom: 20px; }}
+            .header h2 {{ color: #5E9190; margin: 0; font-size: 20px; }}
+            .field {{ margin-bottom: 14px; }}
+            .label {{ font-weight: bold; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }}
+            .value {{ font-size: 15px; color: #1e293b; margin-top: 4px; font-weight: 500; }}
+            .message-box {{ background-color: #f8fafc; border-left: 4px solid #5E9190; padding: 14px 16px; margin-top: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; color: #334155; }}
+            .footer {{ margin-top: 24px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 14px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>🌲 Pesan & Kritik Saran Masuk - Go Wapit</h2>
             </div>
-        </body>
-        </html>
-        """
-        msg.attach(MIMEText(plain_text, "plain"))
-        msg.attach(MIMEText(html_content, "html"))
+            <div class="field">
+                <div class="label">Nama Pengirim:</div>
+                <div class="value">{nama}</div>
+            </div>
+            <div class="field">
+                <div class="label">Email Pengirim:</div>
+                <div class="value"><a href="mailto:{email_pengirim}" style="color: #5E9190; text-decoration: none;">{email_pengirim}</a></div>
+            </div>
+            <div class="field">
+                <div class="label">Waktu Kirim:</div>
+                <div class="value">{datetime.now().strftime("%d %B %Y, %H:%M WIB")}</div>
+            </div>
+            <div class="field">
+                <div class="label">Isi Pesan / Kritik & Saran:</div>
+                <div class="message-box">{isi_pesan}</div>
+            </div>
+            <div class="footer">
+                Email ini dikirim otomatis oleh sistem backend aplikasi Go Wapit (Umbul Jumprit, Temanggung).
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-        # Coba kirim via Port 465 (SSL) terlebih dahulu, jika gagal fallback ke Port 587 (STARTTLS)
-        server = None
+    # --- METODE 1: RESEND API (HTTPS Port 443 - Terbaik & Paling Stabil di Cloud) ---
+    if resend_api_key:
         try:
-            import ssl
-            context = ssl.create_default_context()
-            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=12)
-        except Exception as ssl_err:
-            print(f"[SMTP Warning] Koneksi SSL 465 gagal ({ssl_err}), mencoba STARTTLS 587...")
-            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=12)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
+            res = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {resend_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "from": "Go Wapit <onboarding@resend.dev>",
+                    "to": [admin_email],
+                    "reply_to": email_pengirim,
+                    "subject": subject,
+                    "html": html_content,
+                    "text": plain_text
+                },
+                timeout=10
+            )
+            if res.status_code in [200, 201]:
+                msg_ok = f"[Resend Success] Email berhasil dikirim via Resend API ke {admin_email}."
+                print(msg_ok)
+                return {"sent": True, "provider": "Resend HTTPS API", "destination": admin_email, "message": msg_ok}
+            else:
+                print(f"[Resend Error] Status {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"[Resend Exception] {e}")
 
-        server.login(smtp_email, smtp_app_password)
-        server.sendmail(smtp_email, admin_email, msg.as_string())
-        server.quit()
-        success_msg = f"[SMTP Success] Email notifikasi pesan dari {nama} ({email_pengirim}) berhasil dikirim ke {admin_email}."
-        print(success_msg)
-        return {"sent": True, "destination": admin_email, "message": success_msg}
-    except Exception as e:
-        err_msg = f"[SMTP Error] Gagal mengirim email: {str(e)}"
-        print(err_msg)
-        return {"sent": False, "error": str(e), "message": err_msg}
+    # --- METODE 2: WEB3FORMS API (HTTPS Port 443) ---
+    if web3forms_key:
+        try:
+            res = requests.post(
+                "https://api.web3forms.com/submit",
+                json={
+                    "access_key": web3forms_key,
+                    "subject": subject,
+                    "from_name": f"Go Wapit - {nama}",
+                    "name": nama,
+                    "email": email_pengirim,
+                    "message": isi_pesan
+                },
+                timeout=10
+            )
+            if res.status_code == 200:
+                msg_ok = f"[Web3Forms Success] Email berhasil dikirim via Web3Forms API ke {admin_email}."
+                print(msg_ok)
+                return {"sent": True, "provider": "Web3Forms HTTPS API", "destination": admin_email, "message": msg_ok}
+        except Exception as e:
+            print(f"[Web3Forms Exception] {e}")
+
+    # --- METODE 3: BREVO API (HTTPS Port 443) ---
+    if brevo_api_key:
+        try:
+            res = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": brevo_api_key,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "sender": {"name": "Go Wapit", "email": "notification@gowapit.app"},
+                    "to": [{"email": admin_email}],
+                    "replyTo": {"email": email_pengirim, "name": nama},
+                    "subject": subject,
+                    "htmlContent": html_content,
+                    "textContent": plain_text
+                },
+                timeout=10
+            )
+            if res.status_code in [200, 201]:
+                msg_ok = f"[Brevo Success] Email berhasil dikirim via Brevo API ke {admin_email}."
+                print(msg_ok)
+                return {"sent": True, "provider": "Brevo HTTPS API", "destination": admin_email, "message": msg_ok}
+        except Exception as e:
+            print(f"[Brevo Exception] {e}")
+
+    # --- METODE 4: DIRECT SMTP GMAIL (Jika port tidak diblokir host) ---
+    smtp_email = get_env_flexible("SMTP_EMAIL", "gowapitapp@gmail.com").strip()
+    smtp_app_password = get_env_flexible("SMTP_APP_PASSWORD", "jklzjmnutilkdfqq").replace(" ", "").replace('"', '').replace("'", "").strip()
+
+    if smtp_email and smtp_app_password:
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f"Go Wapit Notification <{smtp_email}>"
+            msg["To"] = admin_email
+            msg["Reply-To"] = email_pengirim
+            msg.attach(MIMEText(plain_text, "plain"))
+            msg.attach(MIMEText(html_content, "html"))
+
+            server = None
+            try:
+                import ssl
+                context = ssl.create_default_context()
+                server = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=4)
+            except Exception:
+                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=4)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+
+            server.login(smtp_email, smtp_app_password)
+            server.sendmail(smtp_email, admin_email, msg.as_string())
+            server.quit()
+            success_msg = f"[SMTP Success] Email notifikasi pesan dari {nama} ({email_pengirim}) berhasil dikirim ke {admin_email}."
+            print(success_msg)
+            return {"sent": True, "provider": "Gmail SMTP", "destination": admin_email, "message": success_msg}
+        except Exception as e:
+            err_msg = f"[SMTP Error] Port SMTP dibatasi oleh cloud host ({e}). Gunakan RESEND_API_KEY atau WEB3FORMS_ACCESS_KEY via HTTPS."
+            print(err_msg)
+            return {"sent": False, "error": str(e), "message": err_msg}
+
+    return {"sent": False, "reason": "No email provider configured"}
 
 class PesanRequest(BaseModel):
     nama: str
@@ -1031,7 +1107,7 @@ class PesanRequest(BaseModel):
     isi_pesan: str
 
 @app.post("/api/pesan")
-def kirim_pesan(payload: PesanRequest, db: Session = Depends(get_db)):
+def kirim_pesan(payload: PesanRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     nama = payload.nama.strip()
     email = payload.email.strip()
     isi_pesan = payload.isi_pesan.strip()
@@ -1049,13 +1125,12 @@ def kirim_pesan(payload: PesanRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(pesan_baru)
 
-    # Kirim notifikasi email ke Gmail admin
-    email_result = kirim_email_notifikasi_pesan(nama, email, isi_pesan)
+    # Kirim email notifikasi secara asynchronous di background
+    background_tasks.add_task(kirim_email_notifikasi_pesan, nama, email, isi_pesan)
 
     return {
         "status": "success",
         "message": "Pesan berhasil dikirim dan tersimpan.",
-        "email_delivery": email_result,
         "data": {
             "id": pesan_baru.id,
             "nama": pesan_baru.nama,
@@ -1067,13 +1142,9 @@ def kirim_pesan(payload: PesanRequest, db: Session = Depends(get_db)):
 @app.get("/api/test-email")
 def test_email_endpoint():
     """Endpoint diagnostik untuk menguji pengiriman email SMTP dan mengecek variabel Railway."""
-    smtp_email = get_env_flexible("SMTP_EMAIL", "gowapitapp@gmail.com").strip()
-    smtp_app_password = get_env_flexible("SMTP_APP_PASSWORD", "jklzjmnutilkdfqq").replace(" ", "").replace('"', '').replace("'", "").strip()
     admin_email = get_env_flexible("ADMIN_EMAIL", "panoclassroom@gmail.com").strip()
-
-    masked_email = f"{smtp_email[:3]}***@{smtp_email.split('@')[-1]}" if "@" in smtp_email else "BELUM DIATUR"
-    masked_admin = f"{admin_email[:3]}***@{admin_email.split('@')[-1]}" if "@" in admin_email else "BELUM DIATUR"
-    password_len = len(smtp_app_password)
+    resend_key = get_env_flexible("RESEND_API_KEY", "")
+    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", ""))
 
     test_res = kirim_email_notifikasi_pesan(
         nama="Sistem Tes Go Wapit",
@@ -1085,9 +1156,9 @@ def test_email_endpoint():
         "status": "success" if test_res.get("sent") else "failed",
         "result": test_res,
         "diagnostics": {
-            "SMTP_EMAIL_masked": masked_email,
-            "SMTP_APP_PASSWORD_length": password_len,
-            "ADMIN_EMAIL_masked": masked_admin
+            "ADMIN_EMAIL": f"{admin_email[:3]}***@{admin_email.split('@')[-1]}" if "@" in admin_email else "BELUM DIATUR",
+            "RESEND_API_KEY_configured": bool(resend_key),
+            "WEB3FORMS_ACCESS_KEY_configured": bool(web3forms_key)
         }
     }
 
