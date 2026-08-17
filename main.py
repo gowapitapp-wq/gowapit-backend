@@ -1151,7 +1151,7 @@ def test_email_endpoint():
     """Endpoint diagnostik untuk menguji pengiriman email SMTP dan mengecek variabel Railway."""
     admin_email = get_env_flexible("ADMIN_EMAIL", "panoclassroom@gmail.com").strip()
     resend_key = get_env_flexible("RESEND_API_KEY", "")
-    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", ""))
+    web3forms_key = get_env_flexible("WEB3FORMS_ACCESS_KEY", get_env_flexible("WEB3FORMS_KEY", "c21159d8-8a23-4ea9-ad82-07706a49dc35"))
 
     test_res = kirim_email_notifikasi_pesan(
         nama="Sistem Tes Go Wapit",
