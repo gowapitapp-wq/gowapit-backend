@@ -69,6 +69,7 @@ class LayananUmumModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     nama_layanan = Column(String)
     kontak = Column(String)
+    deskripsi = Column(Text, nullable=True)
 
 class VoucherModel(Base):
     __tablename__ = "voucher"

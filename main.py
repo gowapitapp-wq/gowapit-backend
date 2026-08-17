@@ -144,6 +144,28 @@ def run_db_migrations():
             conn.commit()
     except Exception:
         pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE layanan_umum ADD COLUMN deskripsi TEXT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text(
+                "UPDATE layanan_umum SET kontak = '(0293) 4901790', deskripsi = 'Layanan darurat penanggulangan kebakaran dan penyelamatan (rescue) wilayah Ngadirejo. Lokasi Induk: Jl. Lingkar Utara Maron, Sidorejo, Temanggung. Jam Operasional: 24 Jam' WHERE nama_layanan LIKE '%Pemadam%'"
+            ))
+            conn.execute(text(
+                "UPDATE layanan_umum SET kontak = '119', deskripsi = 'Layanan transportasi medis darurat untuk penanganan cepat pasien kritis dan korban kecelakaan di wilayah Ngadirejo. Lokasi: PSC 119 Dinas Kesehatan Kab. Temanggung. Jam Operasional: 24 Jam' WHERE nama_layanan LIKE '%Ambulance%'"
+            ))
+            conn.execute(text(
+                "UPDATE layanan_umum SET nama_layanan = 'Polsek Ngadirejo', kontak = '(0293) 596220', deskripsi = 'Unit pelaksana kepolisian di tingkat kecamatan yang menjaga keamanan, ketertiban masyarakat, dan perlindungan hukum di wilayah Kecamatan Ngadirejo. Lokasi: Jl. Raya Candiroto No.1, Dandu, Manggong, Kec. Ngadirejo, Kab. Temanggung. Jam Operasional: 24 Jam' WHERE nama_layanan LIKE '%Polres%' OR nama_layanan LIKE '%Polsek%'"
+            ))
+            conn.commit()
+    except Exception:
+        pass
 
 run_db_migrations()
 
@@ -257,9 +279,21 @@ def seeder_awal():
     # 3. Seeder Layanan Umum
     if db.query(models.LayananUmumModel).count() == 0:
         db.add_all([
-            models.LayananUmumModel(nama_layanan="Pemadam Kebakaran", kontak="(0293)4901790"),
-            models.LayananUmumModel(nama_layanan="Ambulance", kontak="(0293)491119"),
-            models.LayananUmumModel(nama_layanan="Polres Temanggung", kontak="(0293)491110"),
+            models.LayananUmumModel(
+                nama_layanan="Pemadam Kebakaran",
+                kontak="(0293) 4901790",
+                deskripsi="Layanan darurat penanggulangan kebakaran dan penyelamatan (rescue) wilayah Ngadirejo. Lokasi Induk: Jl. Lingkar Utara Maron, Sidorejo, Temanggung. Jam Operasional: 24 Jam",
+            ),
+            models.LayananUmumModel(
+                nama_layanan="Ambulance",
+                kontak="119",
+                deskripsi="Layanan transportasi medis darurat untuk penanganan cepat pasien kritis dan korban kecelakaan di wilayah Ngadirejo. Lokasi: PSC 119 Dinas Kesehatan Kab. Temanggung. Jam Operasional: 24 Jam",
+            ),
+            models.LayananUmumModel(
+                nama_layanan="Polsek Ngadirejo",
+                kontak="(0293) 596220",
+                deskripsi="Unit pelaksana kepolisian di tingkat kecamatan yang menjaga keamanan, ketertiban masyarakat, dan perlindungan hukum di wilayah Kecamatan Ngadirejo. Lokasi: Jl. Raya Candiroto No.1, Dandu, Manggong, Kec. Ngadirejo, Kab. Temanggung. Jam Operasional: 24 Jam",
+            ),
         ])
         db.commit()
 
