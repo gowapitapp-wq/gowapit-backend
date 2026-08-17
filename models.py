@@ -13,6 +13,8 @@ class UserModel(Base):
     google_sub = Column(String, nullable=True)
     facebook_id = Column(String, nullable=True)
     role = Column(String, default="user")
+    referral_code = Column(String, unique=True, nullable=True)
+    referred_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"
@@ -38,6 +40,9 @@ class UlasanModel(Base):
     rating = Column(Integer, nullable=False)  # 1 - 5
     ulasan = Column(Text, nullable=True)
     foto = Column(Text, nullable=True)
+    balasan = Column(Text, nullable=True)
+    balasan_at = Column(DateTime, nullable=True)
+    balasan_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -114,4 +119,13 @@ class PesanModel(Base):
     nama = Column(String, nullable=False)
     email = Column(String, nullable=False)
     isi_pesan = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ReferralConfigModel(Base):
+    __tablename__ = "referral_config"
+    id                    = Column(Integer, primary_key=True)
+    reward_referee_type   = Column(String, default="persen")
+    reward_referee_nilai  = Column(Integer, default=10)
+    reward_referrer_type  = Column(String, default="persen")
+    reward_referrer_nilai = Column(Integer, default=10)
+    max_penggunaan        = Column(Integer, default=0)
