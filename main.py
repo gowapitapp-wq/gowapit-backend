@@ -910,6 +910,7 @@ def get_layanan(db: Session = Depends(get_db)):
     return {"status": "success", "data": data_layanan}
 
 # --- KONFIGURASI SMTP EMAIL (HUBUNGI KAMI) ---
+# Auto-redeploy trigger for Railway environment variables sync
 def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str) -> dict:
     smtp_email = (os.getenv("SMTP_EMAIL") or "").strip()
     smtp_app_password = (os.getenv("SMTP_APP_PASSWORD") or "").replace(" ", "").replace('"', '').replace("'", "").strip()
