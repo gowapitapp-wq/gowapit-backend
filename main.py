@@ -561,11 +561,6 @@ def _apply_referral_reward(referee_user: models.UserModel, referrer_user: models
     db.commit()
     return voucher_referee, voucher_referrer
 
-def require_admin(current_user: models.UserModel = Depends(get_current_user)):
-    if (current_user.role or "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Akses ditolak. Fitur ini khusus Admin.")
-    return current_user
-
 @app.get("/")
 def read_root():
     return {"status": "success", "message": "Selamat datang di GoWapit API!"}
@@ -854,6 +849,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if user is None:
         raise HTTPException(status_code=401, detail="User tidak ditemukan")
     return user
+
+def require_admin(current_user: models.UserModel = Depends(get_current_user)):
+    if (current_user.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Akses ditolak. Fitur ini khusus Admin.")
+    return current_user
 
 # Helper untuk token opsional pada endpoint publik (misal GET ulasan)
 def get_optional_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[models.UserModel]:
