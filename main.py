@@ -910,20 +910,39 @@ def get_layanan(db: Session = Depends(get_db)):
     return {"status": "success", "data": data_layanan}
 
 # --- KONFIGURASI SMTP EMAIL (HUBUNGI KAMI) ---
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "gowapit.official@gmail.com")
-SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", SMTP_EMAIL)
+def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str) -> dict:
+    smtp_email = (os.getenv("SMTP_EMAIL") or "").strip()
+    smtp_app_password = (os.getenv("SMTP_APP_PASSWORD") or "").replace(" ", "").replace('"', '').replace("'", "").strip()
+    admin_email = (os.getenv("ADMIN_EMAIL") or smtp_email or "").strip()
 
-def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str):
-    if not SMTP_APP_PASSWORD:
-        print("[SMTP Info] SMTP_APP_PASSWORD belum diatur. Pesan tersimpan di database tanpa pengiriman email.")
-        return
+    if not smtp_email or not smtp_app_password:
+        msg_info = f"[SMTP Info] SMTP_EMAIL ({smtp_email or 'KOSONG'}) atau SMTP_APP_PASSWORD ({'ADA' if smtp_app_password else 'KOSONG'}) belum lengkap. Pesan disimpan ke database."
+        print(msg_info)
+        return {"sent": False, "reason": "SMTP credentials not configured on server", "detail": msg_info}
+
+    if not admin_email:
+        admin_email = smtp_email
+
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = f"🔔 Pesan Baru dari Pengunjung Go Wapit: {nama}"
-        msg["From"] = SMTP_EMAIL
-        msg["To"] = ADMIN_EMAIL
+        msg["From"] = f"Go Wapit Notification <{smtp_email}>"
+        msg["To"] = admin_email
         msg["Reply-To"] = email_pengirim
+
+        plain_text = f"""
+Pesan Baru dari Pengunjung Go Wapit
+
+Nama Pengirim: {nama}
+Email Pengirim: {email_pengirim}
+Waktu Kirim: {datetime.now().strftime('%d %B %Y, %H:%M WIB')}
+
+Isi Pesan / Kritik & Saran:
+{isi_pesan}
+
+---
+Email otomatis dari Go Wapit (Umbul Jumprit, Temanggung)
+"""
 
         html_content = f"""
         <!DOCTYPE html>
@@ -931,21 +950,21 @@ def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str)
         <head>
             <meta charset="utf-8">
             <style>
-                body {{ font-family: Arial, sans-serif; background-color: #f4f6f8; padding: 20px; }}
-                .container {{ background-color: #ffffff; padding: 24px; border-radius: 12px; max-width: 600px; margin: auto; border: 1px solid #e0e0e0; }}
-                .header {{ border-bottom: 2px solid #5E9190; padding-bottom: 12px; margin-bottom: 20px; }}
-                .header h2 {{ color: #5E9190; margin: 0; }}
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f6f8; padding: 20px; color: #333; }}
+                .container {{ background-color: #ffffff; padding: 24px; border-radius: 14px; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
+                .header {{ border-bottom: 2px solid #5E9190; padding-bottom: 14px; margin-bottom: 20px; }}
+                .header h2 {{ color: #5E9190; margin: 0; font-size: 20px; }}
                 .field {{ margin-bottom: 14px; }}
-                .label {{ font-weight: bold; color: #555555; font-size: 13px; }}
-                .value {{ font-size: 15px; color: #222222; margin-top: 4px; }}
-                .message-box {{ background-color: #f9fbfb; border-left: 4px solid #5E9190; padding: 14px; margin-top: 10px; border-radius: 4px; white-space: pre-wrap; }}
-                .footer {{ margin-top: 24px; font-size: 12px; color: #888888; text-align: center; border-top: 1px solid #eeeeee; padding-top: 12px; }}
+                .label {{ font-weight: bold; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }}
+                .value {{ font-size: 15px; color: #1e293b; margin-top: 4px; font-weight: 500; }}
+                .message-box {{ background-color: #f8fafc; border-left: 4px solid #5E9190; padding: 14px 16px; margin-top: 10px; border-radius: 6px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; color: #334155; }}
+                .footer {{ margin-top: 24px; font-size: 12px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; padding-top: 14px; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🌲 Pesan & Saran Masuk - Go Wapit</h2>
+                    <h2>🌲 Pesan & Kritik Saran Masuk - Go Wapit</h2>
                 </div>
                 <div class="field">
                     <div class="label">Nama Pengirim:</div>
@@ -953,7 +972,7 @@ def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str)
                 </div>
                 <div class="field">
                     <div class="label">Email Pengirim:</div>
-                    <div class="value"><a href="mailto:{email_pengirim}">{email_pengirim}</a></div>
+                    <div class="value"><a href="mailto:{email_pengirim}" style="color: #5E9190; text-decoration: none;">{email_pengirim}</a></div>
                 </div>
                 <div class="field">
                     <div class="label">Waktu Kirim:</div>
@@ -970,16 +989,32 @@ def kirim_email_notifikasi_pesan(nama: str, email_pengirim: str, isi_pesan: str)
         </body>
         </html>
         """
+        msg.attach(MIMEText(plain_text, "plain"))
         msg.attach(MIMEText(html_content, "html"))
 
-        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-        server.starttls()
-        server.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, ADMIN_EMAIL, msg.as_string())
+        # Coba kirim via Port 465 (SSL) terlebih dahulu, jika gagal fallback ke Port 587 (STARTTLS)
+        server = None
+        try:
+            import ssl
+            context = ssl.create_default_context()
+            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context, timeout=12)
+        except Exception as ssl_err:
+            print(f"[SMTP Warning] Koneksi SSL 465 gagal ({ssl_err}), mencoba STARTTLS 587...")
+            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=12)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+
+        server.login(smtp_email, smtp_app_password)
+        server.sendmail(smtp_email, admin_email, msg.as_string())
         server.quit()
-        print(f"[SMTP Success] Email notifikasi pesan dari {nama} ({email_pengirim}) berhasil dikirim ke {ADMIN_EMAIL}.")
+        success_msg = f"[SMTP Success] Email notifikasi pesan dari {nama} ({email_pengirim}) berhasil dikirim ke {admin_email}."
+        print(success_msg)
+        return {"sent": True, "destination": admin_email, "message": success_msg}
     except Exception as e:
-        print(f"[SMTP Error] Gagal mengirim email notifikasi: {e}")
+        err_msg = f"[SMTP Error] Gagal mengirim email: {str(e)}"
+        print(err_msg)
+        return {"sent": False, "error": str(e), "message": err_msg}
 
 class PesanRequest(BaseModel):
     nama: str
@@ -1006,16 +1041,56 @@ def kirim_pesan(payload: PesanRequest, db: Session = Depends(get_db)):
     db.refresh(pesan_baru)
 
     # Kirim notifikasi email ke Gmail admin
-    kirim_email_notifikasi_pesan(nama, email, isi_pesan)
+    email_result = kirim_email_notifikasi_pesan(nama, email, isi_pesan)
 
     return {
         "status": "success",
         "message": "Pesan berhasil dikirim dan tersimpan.",
+        "email_delivery": email_result,
         "data": {
             "id": pesan_baru.id,
             "nama": pesan_baru.nama,
             "email": pesan_baru.email,
             "created_at": str(pesan_baru.created_at)
+        }
+    }
+
+@app.get("/api/test-email")
+def test_email_endpoint():
+    """Endpoint diagnostik untuk menguji pengiriman email SMTP dan mengecek variabel Railway."""
+    smtp_email = (os.getenv("SMTP_EMAIL") or "").strip()
+    smtp_app_password = (os.getenv("SMTP_APP_PASSWORD") or "").replace(" ", "").replace('"', '').replace("'", "").strip()
+    admin_email = (os.getenv("ADMIN_EMAIL") or smtp_email or "").strip()
+
+    masked_email = f"{smtp_email[:3]}***@{smtp_email.split('@')[-1]}" if "@" in smtp_email else "BELUM DIATUR"
+    masked_admin = f"{admin_email[:3]}***@{admin_email.split('@')[-1]}" if "@" in admin_email else "BELUM DIATUR"
+    password_len = len(smtp_app_password)
+
+    if not smtp_email or not smtp_app_password:
+        return {
+            "status": "error",
+            "message": "Variabel SMTP_EMAIL atau SMTP_APP_PASSWORD belum diisi di Railway!",
+            "diagnostics": {
+                "SMTP_EMAIL_configured": bool(smtp_email),
+                "SMTP_EMAIL_masked": masked_email,
+                "SMTP_APP_PASSWORD_length": password_len,
+                "ADMIN_EMAIL_masked": masked_admin
+            }
+        }
+
+    test_res = kirim_email_notifikasi_pesan(
+        nama="Sistem Tes Go Wapit",
+        email_pengirim="tester@gowapit.app",
+        isi_pesan="Ini adalah email uji coba (test email) untuk memastikan konfigurasi SMTP Railway berhasil."
+    )
+
+    return {
+        "status": "success" if test_res.get("sent") else "failed",
+        "result": test_res,
+        "diagnostics": {
+            "SMTP_EMAIL_masked": masked_email,
+            "SMTP_APP_PASSWORD_length": password_len,
+            "ADMIN_EMAIL_masked": masked_admin
         }
     }
 
