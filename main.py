@@ -1,7 +1,7 @@
 import os
+import re
 import random
 import string
-import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -219,6 +219,13 @@ def run_db_migrations():
         with engine.connect() as conn:
             from sqlalchemy import text
             conn.execute(text("ALTER TABLE ulasan ADD COLUMN balasan_by TEXT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE voucher ADD COLUMN user_id INTEGER"))
             conn.commit()
     except Exception:
         pass
@@ -454,8 +461,7 @@ def seeder_awal():
             nama_lengkap="Petugas Loket Wapit",
             email="petugas@gowapit.com",
             password=hashed_pwd,
-            role="petugas",
-            referral_code="PETUGAS-WAPIT"
+            role="petugas"
         )
         db.add(petugas)
         db.commit()
@@ -480,92 +486,23 @@ def seeder_awal():
     else:
         if admin_user.role != "admin":
             admin_user.role = "admin"
-        if not admin_user.referral_code:
-            admin_user.referral_code = "ADMIN-WAPIT"
-        db.commit()
+            db.commit()
 
-    # 6. Seeder Referral Config (Row id=1)
-    ref_config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-    if not ref_config:
-        db.add(models.ReferralConfigModel(
+    # 6. Seeder Konfigurasi Referral Default
+    ref_cfg = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
+    if not ref_cfg:
+        ref_cfg = models.ReferralConfigModel(
             id=1,
             reward_referee_type="persen",
             reward_referee_nilai=10,
             reward_referrer_type="persen",
             reward_referrer_nilai=10,
             max_penggunaan=0
-        ))
-        db.commit()
-
-    # 7. Pastikan user yang sudah ada memiliki kode referral
-    users_tanpa_ref = db.query(models.UserModel).filter(models.UserModel.referral_code == None).all()
-    for u in users_tanpa_ref:
-        pfx = _clean_name_prefix(u.nama_lengkap)
-        rand_sfx = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-        u.referral_code = f"{pfx}-{rand_sfx}"
-    if users_tanpa_ref:
+        )
+        db.add(ref_cfg)
         db.commit()
     
     db.close()
-
-# ============================================================
-# HELPER REFERRAL & ADMIN
-# ============================================================
-def _clean_name_prefix(nama: str) -> str:
-    cleaned = re.sub(r'[^A-Za-z0-9]', '', (nama or "USER").split()[0].upper())
-    return cleaned[:8] if cleaned else "WAPIT"
-
-def _generate_unique_referral_code(nama: str, db: Session) -> str:
-    prefix = _clean_name_prefix(nama)
-    for _ in range(30):
-        suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-        code = f"{prefix}-{suffix}"
-        if not db.query(models.UserModel).filter(models.UserModel.referral_code == code).first():
-            return code
-    return f"WPT-{uuid.uuid4().hex[:6].upper()}"
-
-def _generate_random_voucher_code(db: Session, prefix: str = "REF") -> str:
-    for _ in range(50):
-        rand_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        kode = f"{prefix}-{rand_str}" if prefix else rand_str
-        if not db.query(models.VoucherModel).filter(models.VoucherModel.kode == kode).first():
-            return kode
-    return f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
-
-def _apply_referral_reward(referee_user: models.UserModel, referrer_user: models.UserModel, db: Session):
-    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-    referee_type = config.reward_referee_type if config else "persen"
-    referee_nilai = config.reward_referee_nilai if config else 10
-    referrer_type = config.reward_referrer_type if config else "persen"
-    referrer_nilai = config.reward_referrer_nilai if config else 10
-
-    # 1. Voucher untuk referee (pengguna baru) dengan kode acak
-    kode_referee = _generate_random_voucher_code(db, prefix="REF")
-    voucher_referee = models.VoucherModel(
-        kode=kode_referee,
-        tipe=referee_type,
-        nilai=referee_nilai,
-        maks_diskon=50000 if referee_type == "persen" else None,
-        kuota=1,
-        terpakai=0,
-        aktif=1
-    )
-    db.add(voucher_referee)
-
-    # 2. Voucher untuk referrer (pemilik referral) dengan kode acak
-    kode_referrer = _generate_random_voucher_code(db, prefix="REF")
-    voucher_referrer = models.VoucherModel(
-        kode=kode_referrer,
-        tipe=referrer_type,
-        nilai=referrer_nilai,
-        maks_diskon=50000 if referrer_type == "persen" else None,
-        kuota=1,
-        terpakai=0,
-        aktif=1
-    )
-    db.add(voucher_referrer)
-    db.commit()
-    return voucher_referee, voucher_referrer
 
 @app.get("/")
 def read_root():
@@ -605,51 +542,111 @@ def get_destinasi(db: Session = Depends(get_db)):
         })
     return {"status": "success", "data": data}
 
+# --- HELPER REFERRAL CODE & REWARDS ---
+def generate_unique_referral_code(nama_lengkap: str, db: Session) -> str:
+    clean_name = re.sub(r'[^A-Z]', '', (nama_lengkap.split()[0] if nama_lengkap else 'WAPIT').upper())
+    if len(clean_name) < 3:
+        clean_name = "WAPIT"
+    clean_name = clean_name[:6]
+
+    for _ in range(30):
+        suffix = ''.join(random.choices(string.digits, k=4))
+        code = f"{clean_name}-{suffix}"
+        existing = db.query(models.UserModel).filter(models.UserModel.referral_code == code).first()
+        if not existing:
+            return code
+    return f"{clean_name}-{uuid.uuid4().hex[:4].upper()}"
+
+def apply_referral_rewards(referee: models.UserModel, referrer: models.UserModel, db: Session) -> dict:
+    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
+    if not config:
+        config = models.ReferralConfigModel(
+            id=1,
+            reward_referee_type="persen",
+            reward_referee_nilai=10,
+            reward_referrer_type="persen",
+            reward_referrer_nilai=10,
+            max_penggunaan=0
+        )
+        db.add(config)
+        db.commit()
+
+    referee_name = re.sub(r'[^A-Z]', '', (referee.nama_lengkap.split()[0] if referee.nama_lengkap else 'USER').upper())[:5]
+    code_referee = f"REF-{referee_name}-{uuid.uuid4().hex[:4].upper()}"
+    voucher_referee = models.VoucherModel(
+        kode=code_referee,
+        tipe=config.reward_referee_type,
+        nilai=config.reward_referee_nilai,
+        maks_diskon=25000 if config.reward_referee_type == "persen" else None,
+        kuota=1,
+        terpakai=0,
+        aktif=1,
+        user_id=referee.id
+    )
+    db.add(voucher_referee)
+
+    referrer_name = re.sub(r'[^A-Z]', '', (referrer.nama_lengkap.split()[0] if referrer.nama_lengkap else 'OWNER').upper())[:5]
+    code_referrer = f"REF-{referrer_name}-{uuid.uuid4().hex[:4].upper()}"
+    voucher_referrer = models.VoucherModel(
+        kode=code_referrer,
+        tipe=config.reward_referrer_type,
+        nilai=config.reward_referrer_nilai,
+        maks_diskon=25000 if config.reward_referrer_type == "persen" else None,
+        kuota=1,
+        terpakai=0,
+        aktif=1,
+        user_id=referrer.id
+    )
+    db.add(voucher_referrer)
+    db.commit()
+
+    return {
+        "referee_voucher": {"kode": voucher_referee.kode, "tipe": voucher_referee.tipe, "nilai": voucher_referee.nilai},
+        "referrer_voucher": {"kode": voucher_referrer.kode, "tipe": voucher_referrer.tipe, "nilai": voucher_referrer.nilai}
+    }
+
 @app.post("/api/register")
 def register_user(user_data: dict, db: Session = Depends(get_db)):
     if not user_data.get("email") or not user_data.get("password") or not user_data.get("nama_lengkap"):
         raise HTTPException(status_code=400, detail="Semua field wajib diisi!")
 
-    user_exists = db.query(models.UserModel).filter(models.UserModel.email == user_data["email"]).first()
+    user_exists = db.query(models.UserModel).filter(models.UserModel.email == user_data["email"].strip().lower()).first()
     if user_exists:
         raise HTTPException(status_code=400, detail="Email sudah digunakan!")
 
+    my_referral_code = generate_unique_referral_code(user_data["nama_lengkap"], db)
     hashed_pwd = get_password_hash(user_data["password"])
-    ref_code_baru = _generate_unique_referral_code(user_data["nama_lengkap"], db)
     
+    referrer = None
+    input_ref = user_data.get("referral_code")
+    if input_ref and str(input_ref).strip():
+        ref_clean = str(input_ref).strip().upper()
+        referrer = db.query(models.UserModel).filter(func.upper(models.UserModel.referral_code) == ref_clean).first()
+        if not referrer:
+            raise HTTPException(status_code=400, detail="Kode referral yang Anda masukkan tidak ditemukan!")
+
     baru = models.UserModel(
         nama_lengkap=user_data["nama_lengkap"],
-        email=user_data["email"],
+        email=user_data["email"].strip().lower(),
         password=hashed_pwd,
-        referral_code=ref_code_baru
+        role="user",
+        referral_code=my_referral_code,
+        referred_by=referrer.id if referrer else None
     )
     db.add(baru)
     db.commit()
     db.refresh(baru)
 
-    # Cek apakah pendaftar memasukkan kode referral
-    input_ref_code = (user_data.get("referral_code") or "").strip().upper()
-    if input_ref_code:
-        referrer = db.query(models.UserModel).filter(models.UserModel.referral_code == input_ref_code).first()
-        if referrer and referrer.id != baru.id:
-            # Cek limit penggunaan jika ada
-            config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-            max_use = config.max_penggunaan if config else 0
-            count_used = db.query(models.UserModel).filter(models.UserModel.referred_by == referrer.id).count()
-            
-            if max_use == 0 or count_used < max_use:
-                baru.referred_by = referrer.id
-                db.commit()
-                try:
-                    _apply_referral_reward(baru, referrer, db)
-                except Exception as e:
-                    print(f"[Referral Reward Error] {e}")
+    rewards_data = None
+    if referrer:
+        rewards_data = apply_referral_rewards(baru, referrer, db)
 
     return {
         "status": "success",
         "message": "Akun berhasil dibuat!",
         "user_id": baru.id,
-        "referral_code": baru.referral_code
+        "referral_code": baru.referral_code,
+        "referral_rewards": rewards_data
     }
 
 @app.post("/api/login")
@@ -657,11 +654,16 @@ def login_user(login_data: dict, db: Session = Depends(get_db)):
     if not login_data.get("email") or not login_data.get("password"):
         raise HTTPException(status_code=400, detail="Email dan password wajib diisi!")
 
-    user = db.query(models.UserModel).filter(models.UserModel.email == login_data["email"]).first()
+    user = db.query(models.UserModel).filter(models.UserModel.email == login_data["email"].strip().lower()).first()
     
     if not user or not verify_password(login_data["password"], user.password):
         raise HTTPException(status_code=400, detail="Email atau password salah!")
     
+    if not user.referral_code:
+        user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
+        db.commit()
+        db.refresh(user)
+
     # 1. Buat masa berlaku token (aktif 7 hari)
     expire = datetime.now(timezone.utc) + timedelta(days=7)
     
@@ -679,7 +681,9 @@ def login_user(login_data: dict, db: Session = Depends(get_db)):
             "id": user.id,
             "nama_lengkap": user.nama_lengkap,
             "email": user.email,
-            "role": user.role or "user"
+            "role": user.role or "user",
+            "referral_code": user.referral_code,
+            "referred_by": user.referred_by
         }
     }
 
@@ -715,9 +719,11 @@ def google_auth(data: dict, db: Session = Depends(get_db)):
 
     # 2. Jika belum ada, cari berdasarkan email lalu tautkan google_sub
     if not user:
-        user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+        user = db.query(models.UserModel).filter(models.UserModel.email == email.strip().lower()).first()
         if user:
             user.google_sub = google_sub
+            if not user.referral_code:
+                user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
             db.commit()
             db.refresh(user)
 
@@ -726,10 +732,11 @@ def google_auth(data: dict, db: Session = Depends(get_db)):
         random_pwd = get_password_hash(uuid.uuid4().hex)
         user = models.UserModel(
             nama_lengkap=nama_lengkap,
-            email=email,
+            email=email.strip().lower(),
             password=random_pwd,
             google_sub=google_sub,
-            role="user"
+            role="user",
+            referral_code=generate_unique_referral_code(nama_lengkap, db)
         )
         db.add(user)
         db.commit()
@@ -748,7 +755,9 @@ def google_auth(data: dict, db: Session = Depends(get_db)):
             "id": user.id,
             "nama_lengkap": user.nama_lengkap,
             "email": user.email,
-            "role": user.role or "user"
+            "role": user.role or "user",
+            "referral_code": user.referral_code,
+            "referred_by": user.referred_by
         }
     }
 
@@ -804,6 +813,8 @@ def facebook_auth(data: dict, db: Session = Depends(get_db)):
                 user.facebook_id = str(facebook_id)
             if foto_profil and not user.foto_profil:
                 user.foto_profil = foto_profil
+            if not user.referral_code:
+                user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
             db.commit()
             db.refresh(user)
 
@@ -816,7 +827,8 @@ def facebook_auth(data: dict, db: Session = Depends(get_db)):
             password=random_pwd,
             facebook_id=str(facebook_id) if facebook_id else None,
             foto_profil=foto_profil,
-            role="user"
+            role="user",
+            referral_code=generate_unique_referral_code(nama_lengkap, db)
         )
         db.add(user)
         db.commit()
@@ -836,7 +848,9 @@ def facebook_auth(data: dict, db: Session = Depends(get_db)):
             "nama_lengkap": user.nama_lengkap,
             "email": user.email,
             "foto_profil": user.foto_profil,
-            "role": user.role or "user"
+            "role": user.role or "user",
+            "referral_code": user.referral_code,
+            "referred_by": user.referred_by
         }
     }
 
@@ -858,7 +872,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 def require_admin(current_user: models.UserModel = Depends(get_current_user)):
     if (current_user.role or "").lower() != "admin":
-        raise HTTPException(status_code=403, detail="Akses ditolak. Fitur ini khusus Admin.")
+        raise HTTPException(status_code=403, detail="Akses ditolak: Hanya admin yang memiliki hak akses.")
     return current_user
 
 # Helper untuk token opsional pada endpoint publik (misal GET ulasan)
@@ -919,66 +933,6 @@ def get_ulasan_destinasi(
         })
     return {"status": "success", "data": data}
 
-class BalasanUlasanRequest(BaseModel):
-    balasan: str
-
-@app.post("/api/destinasi/{destinasi_id}/ulasan/{ulasan_id}/balasan")
-def balas_ulasan(
-    destinasi_id: int,
-    ulasan_id: int,
-    req: BalasanUlasanRequest,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    ulasan = db.query(models.UlasanModel).filter(
-        models.UlasanModel.id == ulasan_id,
-        models.UlasanModel.destinasi_id == destinasi_id
-    ).first()
-    if not ulasan:
-        raise HTTPException(status_code=404, detail="Ulasan tidak ditemukan")
-
-    teks_balasan = req.balasan.strip()
-    if not teks_balasan:
-        raise HTTPException(status_code=400, detail="Teks balasan tidak boleh kosong")
-
-    ulasan.balasan = teks_balasan
-    ulasan.balasan_at = datetime.utcnow()
-    ulasan.balasan_by = current_admin.nama_lengkap or "Admin Go Wapit"
-    db.commit()
-    db.refresh(ulasan)
-
-    return {
-        "status": "success",
-        "message": "Balasan berhasil disimpan!",
-        "data": {
-            "id": ulasan.id,
-            "balasan": ulasan.balasan,
-            "balasan_at": ulasan.balasan_at.isoformat() if ulasan.balasan_at else None,
-            "balasan_by": ulasan.balasan_by
-        }
-    }
-
-@app.delete("/api/destinasi/{destinasi_id}/ulasan/{ulasan_id}/balasan")
-def hapus_balasan_ulasan(
-    destinasi_id: int,
-    ulasan_id: int,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    ulasan = db.query(models.UlasanModel).filter(
-        models.UlasanModel.id == ulasan_id,
-        models.UlasanModel.destinasi_id == destinasi_id
-    ).first()
-    if not ulasan:
-        raise HTTPException(status_code=404, detail="Ulasan tidak ditemukan")
-
-    ulasan.balasan = None
-    ulasan.balasan_at = None
-    ulasan.balasan_by = None
-    db.commit()
-
-    return {"status": "success", "message": "Balasan berhasil dihapus!"}
-
 @app.post("/api/destinasi/{destinasi_id}/ulasan")
 def create_or_update_ulasan(
     destinasi_id: int,
@@ -1015,6 +969,8 @@ def create_or_update_ulasan(
                 "ulasan": existing.ulasan,
                 "foto": existing.foto,
                 "balasan": existing.balasan,
+                "balasan_at": existing.balasan_at.isoformat() if existing.balasan_at else None,
+                "balasan_by": existing.balasan_by,
                 "created_at": existing.created_at.isoformat() if existing.created_at else None,
                 "updated_at": existing.updated_at.isoformat() if existing.updated_at else None
             }
@@ -1040,6 +996,8 @@ def create_or_update_ulasan(
                 "ulasan": baru.ulasan,
                 "foto": baru.foto,
                 "balasan": None,
+                "balasan_at": None,
+                "balasan_by": None,
                 "created_at": baru.created_at.isoformat() if baru.created_at else None,
                 "updated_at": baru.updated_at.isoformat() if baru.updated_at else None
             }
@@ -1078,7 +1036,9 @@ def update_ulasan(
             "rating": existing.rating,
             "ulasan": existing.ulasan,
             "foto": existing.foto,
-            "balasan": existing.balasan
+            "balasan": existing.balasan,
+            "balasan_at": existing.balasan_at.isoformat() if existing.balasan_at else None,
+            "balasan_by": existing.balasan_by
         }
     }
 
@@ -1100,18 +1060,72 @@ def delete_ulasan(
     db.commit()
     return {"status": "success", "message": "Ulasan berhasil dihapus!"}
 
+class BalasanUlasanRequest(BaseModel):
+    balasan: str
+
+@app.post("/api/destinasi/{destinasi_id}/ulasan/{ulasan_id}/balasan")
+def reply_ulasan(
+    destinasi_id: int,
+    ulasan_id: int,
+    req: BalasanUlasanRequest,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    ulasan = db.query(models.UlasanModel).filter(
+        models.UlasanModel.id == ulasan_id,
+        models.UlasanModel.destinasi_id == destinasi_id
+    ).first()
+    if not ulasan:
+        raise HTTPException(status_code=404, detail="Ulasan tidak ditemukan")
+
+    ulasan.balasan = req.balasan.strip()
+    ulasan.balasan_at = datetime.utcnow()
+    ulasan.balasan_by = admin.nama_lengkap or "Pengelola Go Wapit"
+    db.commit()
+    db.refresh(ulasan)
+
+    return {
+        "status": "success",
+        "message": "Balasan berhasil dikirim!",
+        "data": {
+            "id": ulasan.id,
+            "balasan": ulasan.balasan,
+            "balasan_at": ulasan.balasan_at.isoformat() if ulasan.balasan_at else None,
+            "balasan_by": ulasan.balasan_by
+        }
+    }
+
+@app.delete("/api/destinasi/{destinasi_id}/ulasan/{ulasan_id}/balasan")
+def delete_reply_ulasan(
+    destinasi_id: int,
+    ulasan_id: int,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    ulasan = db.query(models.UlasanModel).filter(
+        models.UlasanModel.id == ulasan_id,
+        models.UlasanModel.destinasi_id == destinasi_id
+    ).first()
+    if not ulasan:
+        raise HTTPException(status_code=404, detail="Ulasan tidak ditemukan")
+
+    ulasan.balasan = None
+    ulasan.balasan_at = None
+    ulasan.balasan_by = None
+    db.commit()
+
+    return {"status": "success", "message": "Balasan berhasil dihapus!"}
+
 class UpdateProfileRequest(BaseModel):
     nama_lengkap: str = None
     foto_profil: str = None
 
 @app.get("/api/users/me")
-def get_user_profile(
-    current_user: models.UserModel = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def get_user_profile(current_user: models.UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
     if not current_user.referral_code:
-        current_user.referral_code = _generate_unique_referral_code(current_user.nama_lengkap, db)
+        current_user.referral_code = generate_unique_referral_code(current_user.nama_lengkap, db)
         db.commit()
+        db.refresh(current_user)
 
     return {
         "id": current_user.id,
@@ -1150,297 +1164,6 @@ def update_user_profile(
             "referred_by": current_user.referred_by
         }
     }
-
-# ============================================================
-# ENDPOINTS REFERRAL USER
-# ============================================================
-class UseReferralRequest(BaseModel):
-    referral_code: str
-
-@app.get("/api/referral/my-code")
-def get_my_referral_code(
-    current_user: models.UserModel = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if not current_user.referral_code:
-        current_user.referral_code = _generate_unique_referral_code(current_user.nama_lengkap, db)
-        db.commit()
-
-    total_referred = db.query(models.UserModel).filter(models.UserModel.referred_by == current_user.id).count()
-    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-
-    return {
-        "status": "success",
-        "data": {
-            "referral_code": current_user.referral_code,
-            "total_referred": total_referred,
-            "referred_by": current_user.referred_by,
-            "reward_referee_nilai": config.reward_referee_nilai if config else 10,
-            "reward_referee_type": config.reward_referee_type if config else "persen",
-            "reward_referrer_nilai": config.reward_referrer_nilai if config else 10,
-            "reward_referrer_type": config.reward_referrer_type if config else "persen",
-            "max_penggunaan": config.max_penggunaan if config else 0
-        }
-    }
-
-@app.post("/api/referral/use")
-def use_referral_code(
-    req: UseReferralRequest,
-    current_user: models.UserModel = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.referred_by is not None:
-        raise HTTPException(status_code=400, detail="Anda sudah pernah menggunakan kode referral!")
-
-    code = req.referral_code.strip().upper()
-    if not code:
-        raise HTTPException(status_code=400, detail="Kode referral wajib diisi")
-
-    if current_user.referral_code and code == current_user.referral_code.upper():
-        raise HTTPException(status_code=400, detail="Tidak dapat menggunakan kode referral Anda sendiri!")
-
-    referrer = db.query(models.UserModel).filter(models.UserModel.referral_code == code).first()
-    if not referrer:
-        raise HTTPException(status_code=404, detail="Kode referral tidak ditemukan!")
-    if referrer.id == current_user.id:
-        raise HTTPException(status_code=400, detail="Tidak dapat menggunakan kode referral Anda sendiri!")
-
-    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-    max_use = config.max_penggunaan if config else 0
-    count_used = db.query(models.UserModel).filter(models.UserModel.referred_by == referrer.id).count()
-
-    if max_use > 0 and count_used >= max_use:
-        raise HTTPException(status_code=400, detail="Kuota penggunaan kode referral ini sudah penuh.")
-
-    current_user.referred_by = referrer.id
-    db.commit()
-
-    v_referee, v_referrer = _apply_referral_reward(current_user, referrer, db)
-
-    return {
-        "status": "success",
-        "message": f"Berhasil menggunakan kode referral! Anda mendapatkan voucher diskon {v_referee.nilai}{'%' if v_referee.tipe == 'persen' else ' IDR'}.",
-        "data": {
-            "voucher_kode": v_referee.kode,
-            "tipe": v_referee.tipe,
-            "nilai": v_referee.nilai,
-            "referrer_nama": referrer.nama_lengkap
-        }
-    }
-
-# ============================================================
-# ENDPOINTS ADMIN: REFERRAL CONFIG & VOUCHER CRUD
-# ============================================================
-class ReferralConfigRequest(BaseModel):
-    reward_referee_type: str = "persen"
-    reward_referee_nilai: int = 10
-    reward_referrer_type: str = "persen"
-    reward_referrer_nilai: int = 10
-    max_penggunaan: int = 0
-
-@app.get("/api/referral/config")
-def get_referral_config(
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-    if not config:
-        config = models.ReferralConfigModel(
-            id=1,
-            reward_referee_type="persen",
-            reward_referee_nilai=10,
-            reward_referrer_type="persen",
-            reward_referrer_nilai=10,
-            max_penggunaan=0
-        )
-        db.add(config)
-        db.commit()
-        db.refresh(config)
-
-    return {
-        "status": "success",
-        "data": {
-            "id": config.id,
-            "reward_referee_type": config.reward_referee_type,
-            "reward_referee_nilai": config.reward_referee_nilai,
-            "reward_referrer_type": config.reward_referrer_type,
-            "reward_referrer_nilai": config.reward_referrer_nilai,
-            "max_penggunaan": config.max_penggunaan
-        }
-    }
-
-@app.put("/api/referral/config")
-def update_referral_config(
-    req: ReferralConfigRequest,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
-    if not config:
-        config = models.ReferralConfigModel(id=1)
-        db.add(config)
-
-    config.reward_referee_type = req.reward_referee_type
-    config.reward_referee_nilai = req.reward_referee_nilai
-    config.reward_referrer_type = req.reward_referrer_type
-    config.reward_referrer_nilai = req.reward_referrer_nilai
-    config.max_penggunaan = req.max_penggunaan
-    db.commit()
-    db.refresh(config)
-
-    return {
-        "status": "success",
-        "message": "Pengaturan referral berhasil disimpan!",
-        "data": {
-            "id": config.id,
-            "reward_referee_type": config.reward_referee_type,
-            "reward_referee_nilai": config.reward_referee_nilai,
-            "reward_referrer_type": config.reward_referrer_type,
-            "reward_referrer_nilai": config.reward_referrer_nilai,
-            "max_penggunaan": config.max_penggunaan
-        }
-    }
-
-class VoucherCreateRequest(BaseModel):
-    kode: str
-    tipe: str  # "persen" | "nominal"
-    nilai: int
-    maks_diskon: Optional[int] = None
-    kuota: int = 100
-    aktif: int = 1
-
-class VoucherUpdateRequest(BaseModel):
-    kode: Optional[str] = None
-    tipe: Optional[str] = None
-    nilai: Optional[int] = None
-    maks_diskon: Optional[int] = None
-    kuota: Optional[int] = None
-    aktif: Optional[int] = None
-
-@app.get("/api/vouchers")
-def list_all_vouchers(
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    vouchers = db.query(models.VoucherModel).order_by(models.VoucherModel.created_at.desc()).all()
-    result = []
-    for v in vouchers:
-        result.append({
-            "id": v.id,
-            "kode": v.kode,
-            "tipe": v.tipe,
-            "nilai": v.nilai,
-            "maks_diskon": v.maks_diskon,
-            "kuota": v.kuota,
-            "terpakai": v.terpakai,
-            "aktif": v.aktif,
-            "created_at": v.created_at.isoformat() if v.created_at else None
-        })
-    return {"status": "success", "data": result}
-
-@app.post("/api/vouchers")
-def create_voucher(
-    req: VoucherCreateRequest,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    kode = req.kode.strip().upper()
-    if not kode:
-        raise HTTPException(status_code=400, detail="Kode voucher wajib diisi")
-
-    exists = db.query(models.VoucherModel).filter(models.VoucherModel.kode == kode).first()
-    if exists:
-        raise HTTPException(status_code=400, detail=f"Voucher dengan kode '{kode}' sudah ada!")
-
-    voucher = models.VoucherModel(
-        kode=kode,
-        tipe=req.tipe,
-        nilai=req.nilai,
-        maks_diskon=req.maks_diskon,
-        kuota=req.kuota,
-        terpakai=0,
-        aktif=req.aktif
-    )
-    db.add(voucher)
-    db.commit()
-    db.refresh(voucher)
-
-    return {
-        "status": "success",
-        "message": "Voucher berhasil dibuat!",
-        "data": {
-            "id": voucher.id,
-            "kode": voucher.kode,
-            "tipe": voucher.tipe,
-            "nilai": voucher.nilai,
-            "maks_diskon": voucher.maks_diskon,
-            "kuota": voucher.kuota,
-            "terpakai": voucher.terpakai,
-            "aktif": voucher.aktif
-        }
-    }
-
-@app.put("/api/vouchers/{voucher_id}")
-def update_voucher(
-    voucher_id: int,
-    req: VoucherUpdateRequest,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    voucher = db.query(models.VoucherModel).filter(models.VoucherModel.id == voucher_id).first()
-    if not voucher:
-        raise HTTPException(status_code=404, detail="Voucher tidak ditemukan")
-
-    if req.kode is not None:
-        new_kode = req.kode.strip().upper()
-        if new_kode != voucher.kode:
-            exists = db.query(models.VoucherModel).filter(models.VoucherModel.kode == new_kode).first()
-            if exists:
-                raise HTTPException(status_code=400, detail=f"Voucher dengan kode '{new_kode}' sudah ada!")
-            voucher.kode = new_kode
-
-    if req.tipe is not None:
-        voucher.tipe = req.tipe
-    if req.nilai is not None:
-        voucher.nilai = req.nilai
-    if req.maks_diskon is not None:
-        voucher.maks_diskon = req.maks_diskon
-    if req.kuota is not None:
-        voucher.kuota = req.kuota
-    if req.aktif is not None:
-        voucher.aktif = req.aktif
-
-    db.commit()
-    db.refresh(voucher)
-
-    return {
-        "status": "success",
-        "message": "Voucher berhasil diperbarui!",
-        "data": {
-            "id": voucher.id,
-            "kode": voucher.kode,
-            "tipe": voucher.tipe,
-            "nilai": voucher.nilai,
-            "maks_diskon": voucher.maks_diskon,
-            "kuota": voucher.kuota,
-            "terpakai": voucher.terpakai,
-            "aktif": voucher.aktif
-        }
-    }
-
-@app.delete("/api/vouchers/{voucher_id}")
-def delete_voucher(
-    voucher_id: int,
-    current_admin: models.UserModel = Depends(require_admin),
-    db: Session = Depends(get_db)
-):
-    voucher = db.query(models.VoucherModel).filter(models.VoucherModel.id == voucher_id).first()
-    if not voucher:
-        raise HTTPException(status_code=404, detail="Voucher tidak ditemukan")
-
-    db.delete(voucher)
-    db.commit()
-    return {"status": "success", "message": "Voucher berhasil dihapus!"}
 
 @app.get("/api/paket")
 def get_paket(db: Session = Depends(get_db)):
@@ -1839,10 +1562,300 @@ def get_slot_paket(
     return {"status": "success", "paket_id": paket_id, "data": hasil}
 
 # ============================================================
+# ============================================================
+# ENDPOINTS REFERRAL
+# ============================================================
+@app.get("/api/referral/my-code")
+def get_my_referral_code(
+    current_user: models.UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.referral_code:
+        current_user.referral_code = generate_unique_referral_code(current_user.nama_lengkap, db)
+        db.commit()
+        db.refresh(current_user)
+    
+    jumlah_penggunaan = db.query(models.UserModel).filter(models.UserModel.referred_by == current_user.id).count()
+    return {
+        "status": "success",
+        "data": {
+            "referral_code": current_user.referral_code,
+            "jumlah_penggunaan": jumlah_penggunaan
+        }
+    }
+
+class UseReferralRequest(BaseModel):
+    kode_referral: str
+
+@app.post("/api/referral/use")
+def use_referral_code(
+    req: UseReferralRequest,
+    current_user: models.UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.referred_by:
+        raise HTTPException(status_code=400, detail="Anda sudah pernah menggunakan kode referral.")
+    
+    kode = req.kode_referral.strip().upper()
+    if not kode:
+        raise HTTPException(status_code=400, detail="Kode referral tidak boleh kosong.")
+
+    if current_user.referral_code and kode == current_user.referral_code.upper():
+        raise HTTPException(status_code=400, detail="Tidak dapat menggunakan kode referral milik sendiri.")
+    
+    referrer = db.query(models.UserModel).filter(func.upper(models.UserModel.referral_code) == kode).first()
+    if not referrer:
+        raise HTTPException(status_code=400, detail="Kode referral tidak ditemukan atau tidak valid.")
+    if referrer.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Tidak dapat menggunakan kode referral milik sendiri.")
+    
+    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
+    if config and config.max_penggunaan and config.max_penggunaan > 0:
+        penggunaan_saat_ini = db.query(models.UserModel).filter(models.UserModel.referred_by == referrer.id).count()
+        if penggunaan_saat_ini >= config.max_penggunaan:
+            raise HTTPException(status_code=400, detail="Batas maksimum penggunaan kode referral ini telah tercapai.")
+
+    current_user.referred_by = referrer.id
+    db.commit()
+
+    rewards = apply_referral_rewards(current_user, referrer, db)
+
+    return {
+        "status": "success",
+        "message": "Kode referral berhasil diterapkan! Anda mendapatkan voucher diskon.",
+        "data": rewards
+    }
+
+@app.get("/api/referral/config")
+def get_referral_config(
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
+    if not config:
+        config = models.ReferralConfigModel(
+            id=1,
+            reward_referee_type="persen",
+            reward_referee_nilai=10,
+            reward_referrer_type="persen",
+            reward_referrer_nilai=10,
+            max_penggunaan=0
+        )
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    return {
+        "status": "success",
+        "data": {
+            "reward_referee_type": config.reward_referee_type,
+            "reward_referee_nilai": config.reward_referee_nilai,
+            "reward_referrer_type": config.reward_referrer_type,
+            "reward_referrer_nilai": config.reward_referrer_nilai,
+            "max_penggunaan": config.max_penggunaan
+        }
+    }
+
+class ReferralConfigUpdate(BaseModel):
+    reward_referee_type: str = "persen"
+    reward_referee_nilai: int = 10
+    reward_referrer_type: str = "persen"
+    reward_referrer_nilai: int = 10
+    max_penggunaan: int = 0
+
+@app.put("/api/referral/config")
+def update_referral_config(
+    req: ReferralConfigUpdate,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
+    if not config:
+        config = models.ReferralConfigModel(id=1)
+        db.add(config)
+    
+    config.reward_referee_type = req.reward_referee_type
+    config.reward_referee_nilai = req.reward_referee_nilai
+    config.reward_referrer_type = req.reward_referrer_type
+    config.reward_referrer_nilai = req.reward_referrer_nilai
+    config.max_penggunaan = req.max_penggunaan
+    db.commit()
+    db.refresh(config)
+
+    return {
+        "status": "success",
+        "message": "Konfigurasi referral berhasil diperbarui!",
+        "data": {
+            "reward_referee_type": config.reward_referee_type,
+            "reward_referee_nilai": config.reward_referee_nilai,
+            "reward_referrer_type": config.reward_referrer_type,
+            "reward_referrer_nilai": config.reward_referrer_nilai,
+            "max_penggunaan": config.max_penggunaan
+        }
+    }
+
+# ============================================================
 # ENDPOINTS VOUCHER
 # ============================================================
+@app.get("/api/vouchers")
+def get_all_vouchers(
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    vouchers = db.query(models.VoucherModel).order_by(models.VoucherModel.created_at.desc()).all()
+    res = []
+    for v in vouchers:
+        res.append({
+            "id": v.id,
+            "kode": v.kode,
+            "tipe": v.tipe,
+            "nilai": v.nilai,
+            "maks_diskon": v.maks_diskon,
+            "kuota": v.kuota,
+            "terpakai": v.terpakai,
+            "aktif": v.aktif,
+            "user_id": v.user_id,
+            "user_nama": v.user.nama_lengkap if v.user else None,
+            "user_email": v.user.email if v.user else None,
+            "created_at": v.created_at.isoformat() if v.created_at else None
+        })
+    return {"status": "success", "data": res}
+
+class VoucherCreateRequest(BaseModel):
+    kode: str
+    tipe: str = "persen"  # "persen" | "nominal"
+    nilai: int
+    maks_diskon: Optional[int] = None
+    kuota: int = 100
+    aktif: int = 1
+    user_id: Optional[int] = None
+
+@app.post("/api/vouchers")
+def create_voucher(
+    req: VoucherCreateRequest,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    kode = req.kode.strip().upper()
+    existing = db.query(models.VoucherModel).filter(models.VoucherModel.kode == kode).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Kode voucher sudah ada!")
+    
+    if req.user_id:
+        u = db.query(models.UserModel).filter(models.UserModel.id == req.user_id).first()
+        if not u:
+            raise HTTPException(status_code=400, detail="User ID tidak ditemukan!")
+
+    voucher = models.VoucherModel(
+        kode=kode,
+        tipe=req.tipe,
+        nilai=req.nilai,
+        maks_diskon=req.maks_diskon,
+        kuota=req.kuota,
+        aktif=req.aktif,
+        user_id=req.user_id,
+        terpakai=0
+    )
+    db.add(voucher)
+    db.commit()
+    db.refresh(voucher)
+    return {"status": "success", "message": "Voucher berhasil dibuat!", "data": {"id": voucher.id, "kode": voucher.kode}}
+
+class VoucherUpdateRequest(BaseModel):
+    kode: Optional[str] = None
+    tipe: Optional[str] = None
+    nilai: Optional[int] = None
+    maks_diskon: Optional[int] = None
+    kuota: Optional[int] = None
+    aktif: Optional[int] = None
+    user_id: Optional[int] = None
+
+@app.put("/api/vouchers/{voucher_id}")
+def update_voucher(
+    voucher_id: int,
+    req: VoucherUpdateRequest,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    voucher = db.query(models.VoucherModel).filter(models.VoucherModel.id == voucher_id).first()
+    if not voucher:
+        raise HTTPException(status_code=404, detail="Voucher tidak ditemukan")
+    
+    if req.kode:
+        kode_up = req.kode.strip().upper()
+        if kode_up != voucher.kode:
+            dup = db.query(models.VoucherModel).filter(models.VoucherModel.kode == kode_up).first()
+            if dup:
+                raise HTTPException(status_code=400, detail="Kode voucher sudah digunakan!")
+            voucher.kode = kode_up
+    if req.tipe is not None:
+        voucher.tipe = req.tipe
+    if req.nilai is not None:
+        voucher.nilai = req.nilai
+    if req.maks_diskon is not None:
+        voucher.maks_diskon = req.maks_diskon
+    if req.kuota is not None:
+        voucher.kuota = req.kuota
+    if req.aktif is not None:
+        voucher.aktif = req.aktif
+    if req.user_id is not None:
+        voucher.user_id = req.user_id if req.user_id > 0 else None
+
+    db.commit()
+    db.refresh(voucher)
+    return {"status": "success", "message": "Voucher berhasil diperbarui!"}
+
+@app.delete("/api/vouchers/{voucher_id}")
+def delete_voucher(
+    voucher_id: int,
+    admin: models.UserModel = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    voucher = db.query(models.VoucherModel).filter(models.VoucherModel.id == voucher_id).first()
+    if not voucher:
+        raise HTTPException(status_code=404, detail="Voucher tidak ditemukan")
+    db.delete(voucher)
+    db.commit()
+    return {"status": "success", "message": "Voucher berhasil dihapus!"}
+
+@app.get("/api/user/vouchers")
+def get_my_vouchers(
+    current_user: models.UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    vouchers = db.query(models.VoucherModel).filter(
+        (models.VoucherModel.user_id == current_user.id) | (models.VoucherModel.user_id == None)
+    ).order_by(models.VoucherModel.created_at.desc()).all()
+
+    res = []
+    for v in vouchers:
+        if v.aktif == 0:
+            status = "nonaktif"
+        elif v.kuota > 0 and v.terpakai >= v.kuota:
+            status = "terpakai"
+        else:
+            status = "tersedia"
+        
+        res.append({
+            "id": v.id,
+            "kode": v.kode,
+            "tipe": v.tipe,
+            "nilai": v.nilai,
+            "maks_diskon": v.maks_diskon,
+            "kuota": v.kuota,
+            "terpakai": v.terpakai,
+            "status": status,
+            "is_personal": (v.user_id == current_user.id),
+            "created_at": v.created_at.isoformat() if v.created_at else None
+        })
+    return {"status": "success", "data": res}
+
 @app.get("/api/voucher/{kode}")
-def get_voucher(kode: str, subtotal: int = 0, db: Session = Depends(get_db)):
+def get_voucher(
+    kode: str,
+    subtotal: int = 0,
+    request: Request = None,
+    db: Session = Depends(get_db)
+):
     voucher = db.query(models.VoucherModel).filter(
         models.VoucherModel.kode == kode.upper()
     ).first()
@@ -1852,6 +1865,11 @@ def get_voucher(kode: str, subtotal: int = 0, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Voucher sudah tidak aktif")
     if voucher.kuota > 0 and voucher.terpakai >= voucher.kuota:
         raise HTTPException(status_code=400, detail="Kuota voucher sudah habis")
+
+    if voucher.user_id is not None:
+        curr_user = get_optional_current_user(request, db) if request else None
+        if not curr_user or curr_user.id != voucher.user_id:
+            raise HTTPException(status_code=400, detail="Voucher ini khusus untuk pemilik akun yang ditentukan")
 
     if voucher.tipe == "persen":
         diskon = int(subtotal * voucher.nilai / 100)
@@ -1954,6 +1972,8 @@ def buat_booking(
         ).first()
         if not voucher or not voucher.aktif:
             raise HTTPException(status_code=400, detail="Kode voucher tidak valid atau tidak aktif")
+        if voucher.user_id is not None and voucher.user_id != current_user.id:
+            raise HTTPException(status_code=400, detail="Voucher ini khusus untuk pemilik akun terkait")
         if voucher.kuota > 0 and voucher.terpakai >= voucher.kuota:
             raise HTTPException(status_code=400, detail="Kuota voucher habis")
         if voucher.tipe == "persen":

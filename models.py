@@ -13,8 +13,8 @@ class UserModel(Base):
     google_sub = Column(String, nullable=True)
     facebook_id = Column(String, nullable=True)
     role = Column(String, default="user")
-    referral_code = Column(String, unique=True, nullable=True)
-    referred_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    referral_code = Column(String, unique=True, index=True, nullable=True)
+    referred_by   = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"
@@ -86,7 +86,19 @@ class VoucherModel(Base):
     kuota       = Column(Integer, default=100)
     terpakai    = Column(Integer, default=0)
     aktif       = Column(Integer, default=1)       # 1=aktif, 0=nonaktif
+    user_id     = Column(Integer, ForeignKey("users.id"), nullable=True)  # None=global, Set=milik user
     created_at  = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("UserModel", backref="user_vouchers", foreign_keys=[user_id])
+
+class ReferralConfigModel(Base):
+    __tablename__ = "referral_config"
+    id                    = Column(Integer, primary_key=True, index=True)
+    reward_referee_type   = Column(String, default="persen")    # "persen" | "nominal"
+    reward_referee_nilai  = Column(Integer, default=10)
+    reward_referrer_type  = Column(String, default="persen")    # "persen" | "nominal"
+    reward_referrer_nilai = Column(Integer, default=10)
+    max_penggunaan        = Column(Integer, default=0)          # 0 = unlimited
 
 class BookingModel(Base):
     __tablename__ = "booking"
@@ -109,9 +121,9 @@ class BookingModel(Base):
     expires_at     = Column(DateTime, nullable=True)
     created_at     = Column(DateTime, default=datetime.utcnow)
 
-    user    = relationship("UserModel", backref="bookings")
+    user    = relationship("UserModel", backref="bookings", foreign_keys=[user_id])
     paket   = relationship("PaketModel", backref="bookings")
-    voucher = relationship("VoucherModel", backref="bookings")
+    voucher = relationship("VoucherModel", backref="bookings", foreign_keys=[voucher_id])
 
 class PesanModel(Base):
     __tablename__ = "pesan"
@@ -119,13 +131,4 @@ class PesanModel(Base):
     nama = Column(String, nullable=False)
     email = Column(String, nullable=False)
     isi_pesan = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class ReferralConfigModel(Base):
-    __tablename__ = "referral_config"
-    id                    = Column(Integer, primary_key=True)
-    reward_referee_type   = Column(String, default="persen")
-    reward_referee_nilai  = Column(Integer, default=10)
-    reward_referrer_type  = Column(String, default="persen")
-    reward_referrer_nilai = Column(Integer, default=10)
-    max_penggunaan        = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
