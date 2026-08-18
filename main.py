@@ -1117,8 +1117,8 @@ def delete_reply_ulasan(
     return {"status": "success", "message": "Balasan berhasil dihapus!"}
 
 class UpdateProfileRequest(BaseModel):
-    nama_lengkap: str = None
-    foto_profil: str = None
+    nama_lengkap: Optional[str] = None
+    foto_profil: Optional[str] = None
 
 @app.get("/api/users/me")
 def get_user_profile(current_user: models.UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
