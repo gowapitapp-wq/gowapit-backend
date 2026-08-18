@@ -524,6 +524,14 @@ def _generate_unique_referral_code(nama: str, db: Session) -> str:
             return code
     return f"WPT-{uuid.uuid4().hex[:6].upper()}"
 
+def _generate_random_voucher_code(db: Session, prefix: str = "REF") -> str:
+    for _ in range(50):
+        rand_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+        kode = f"{prefix}-{rand_str}" if prefix else rand_str
+        if not db.query(models.VoucherModel).filter(models.VoucherModel.kode == kode).first():
+            return kode
+    return f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
+
 def _apply_referral_reward(referee_user: models.UserModel, referrer_user: models.UserModel, db: Session):
     config = db.query(models.ReferralConfigModel).filter(models.ReferralConfigModel.id == 1).first()
     referee_type = config.reward_referee_type if config else "persen"
@@ -531,11 +539,10 @@ def _apply_referral_reward(referee_user: models.UserModel, referrer_user: models
     referrer_type = config.reward_referrer_type if config else "persen"
     referrer_nilai = config.reward_referrer_nilai if config else 10
 
-    # 1. Voucher untuk referee (pengguna baru)
-    referee_pfx = _clean_name_prefix(referee_user.nama_lengkap)
-    referee_rand = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    # 1. Voucher untuk referee (pengguna baru) dengan kode acak
+    kode_referee = _generate_random_voucher_code(db, prefix="REF")
     voucher_referee = models.VoucherModel(
-        kode=f"REF-{referee_pfx}-USER-{referee_rand}",
+        kode=kode_referee,
         tipe=referee_type,
         nilai=referee_nilai,
         maks_diskon=50000 if referee_type == "persen" else None,
@@ -545,11 +552,10 @@ def _apply_referral_reward(referee_user: models.UserModel, referrer_user: models
     )
     db.add(voucher_referee)
 
-    # 2. Voucher untuk referrer (pemilik referral)
-    referrer_pfx = _clean_name_prefix(referrer_user.nama_lengkap)
-    referrer_rand = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    # 2. Voucher untuk referrer (pemilik referral) dengan kode acak
+    kode_referrer = _generate_random_voucher_code(db, prefix="REF")
     voucher_referrer = models.VoucherModel(
-        kode=f"REF-{referrer_pfx}-OWNER-{referrer_rand}",
+        kode=kode_referrer,
         tipe=referrer_type,
         nilai=referrer_nilai,
         maks_diskon=50000 if referrer_type == "persen" else None,
