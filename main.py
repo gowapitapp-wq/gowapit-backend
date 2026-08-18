@@ -618,7 +618,7 @@ def register_user(user_data: dict, db: Session = Depends(get_db)):
     hashed_pwd = get_password_hash(user_data["password"])
     
     referrer = None
-    input_ref = user_data.get("referral_code")
+    input_ref = user_data.get("referral_code") or user_data.get("kode_referral")
     if input_ref and str(input_ref).strip():
         ref_clean = str(input_ref).strip().upper()
         referrer = db.query(models.UserModel).filter(func.upper(models.UserModel.referral_code) == ref_clean).first()
@@ -1852,8 +1852,8 @@ def get_my_vouchers(
 @app.get("/api/voucher/{kode}")
 def get_voucher(
     kode: str,
+    request: Request,
     subtotal: int = 0,
-    request: Request = None,
     db: Session = Depends(get_db)
 ):
     voucher = db.query(models.VoucherModel).filter(
