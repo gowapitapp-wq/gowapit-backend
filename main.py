@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import random
 import string
 import smtplib
@@ -240,6 +241,26 @@ def run_db_migrations():
                     reward_referrer_type VARCHAR DEFAULT 'persen',
                     reward_referrer_nilai INTEGER DEFAULT 10,
                     max_penggunaan INTEGER DEFAULT 0
+                )
+            """))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS kuliner_order (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    order_id VARCHAR UNIQUE,
+                    ticket_code VARCHAR UNIQUE,
+                    items TEXT,
+                    total_harga INTEGER,
+                    status VARCHAR DEFAULT 'PAID',
+                    redeemed_at TIMESTAMP,
+                    redeemed_by TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
             conn.commit()
@@ -2187,8 +2208,96 @@ def get_my_tickets(
             "redeemed_by": b.redeemed_by,
             "nama_pemesan": b.user.nama_lengkap if b.user else current_user.nama_lengkap,
             "email_pemesan": b.user.email if b.user else current_user.email,
+            "created_at": b.created_at.isoformat() if b.created_at else None,
         })
+
+    kuliner_orders = db.query(models.KulinerOrderModel).filter(
+        models.KulinerOrderModel.user_id == current_user.id,
+        models.KulinerOrderModel.status.in_(["PAID", "REDEEMED"])
+    ).order_by(models.KulinerOrderModel.created_at.desc()).all()
+
+    for k in kuliner_orders:
+        try:
+            items_list = json.loads(k.items) if isinstance(k.items, str) else k.items
+        except Exception:
+            items_list = []
+        total_qty = sum(int(item.get("qty", 1)) for item in items_list) if items_list else 1
+        nama_ringkas = ", ".join([f"{item.get('nama', 'Menu')} (x{item.get('qty', 1)})" for item in items_list]) if items_list else "Menu Kuliner Wapit"
+        is_redeemed = (k.status == "REDEEMED")
+        data.append({
+            "id": k.id,
+            "order_id": k.order_id,
+            "ticket_code": k.ticket_code,
+            "nama": nama_ringkas,
+            "kategori": "KULINER",
+            "tanggal_pakai": "Berlaku Hari Ini",
+            "qty": total_qty,
+            "total_harga": f"Rp {k.total_harga:,}".replace(",", "."),
+            "total_harga_raw": k.total_harga,
+            "status": "Terpakai" if is_redeemed else "Aktif",
+            "status_code": k.status,
+            "redeemed_at": k.redeemed_at.isoformat() if k.redeemed_at else None,
+            "redeemed_by": k.redeemed_by,
+            "nama_pemesan": current_user.nama_lengkap,
+            "email_pemesan": current_user.email,
+            "items": items_list,
+            "created_at": k.created_at.isoformat() if k.created_at else None,
+        })
+
     return {"status": "success", "data": data}
+
+# ============================================================
+# ENDPOINT KULINER ORDERS & UNIFIED TICKETS
+# ============================================================
+class KulinerOrderCreateRequest(BaseModel):
+    items: List[dict]
+    total_harga: int
+    order_id: Optional[str] = None
+
+@app.post("/api/kuliner/orders")
+def create_kuliner_order(
+    req: KulinerOrderCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    if not req.items or len(req.items) == 0:
+        raise HTTPException(status_code=400, detail="Daftar item kuliner tidak boleh kosong")
+    if req.total_harga <= 0:
+        raise HTTPException(status_code=400, detail="Total harga kuliner tidak valid")
+
+    current_user = get_optional_current_user(request, db)
+    user_id = current_user.id if current_user else None
+
+    tgl_str = datetime.now().strftime("%Y%m%d")
+    rand_hex = uuid.uuid4().hex[:8].upper()
+    ticket_code = f"WPTK-{tgl_str}-{rand_hex}"
+    order_id = req.order_id or f"KUL-{tgl_str}-{uuid.uuid4().hex[:6].upper()}"
+
+    order = models.KulinerOrderModel(
+        user_id=user_id,
+        order_id=order_id,
+        ticket_code=ticket_code,
+        items=json.dumps(req.items, ensure_ascii=False),
+        total_harga=req.total_harga,
+        status="PAID",
+        created_at=datetime.utcnow()
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+
+    return {
+        "status": "success",
+        "message": "Pesanan kuliner berhasil dibuat!",
+        "data": {
+            "id": order.id,
+            "ticket_code": order.ticket_code,
+            "order_id": order.order_id,
+            "total_harga": order.total_harga,
+            "status": order.status,
+            "created_at": order.created_at.isoformat()
+        }
+    }
 
 class TicketScanRequest(BaseModel):
     ticket_code: str
@@ -2202,36 +2311,81 @@ def validate_ticket(
     if not code:
         raise HTTPException(status_code=400, detail="Kode tiket tidak boleh kosong")
 
+    # 1. Cek di tabel Booking (Paket Wisata)
     booking = db.query(models.BookingModel).filter(
         (models.BookingModel.ticket_code == code) | (models.BookingModel.order_id == code)
     ).first()
 
-    if not booking:
-        raise HTTPException(status_code=404, detail="Kode tiket tidak ditemukan / tidak terdaftar!")
+    if booking:
+        if booking.status not in ["PAID", "REDEEMED"]:
+            raise HTTPException(status_code=400, detail=f"Tiket berstatus {booking.status}, belum dibayar atau sudah dibatalkan")
 
-    if booking.status not in ["PAID", "REDEEMED"]:
-        raise HTTPException(status_code=400, detail=f"Tiket berstatus {booking.status}, belum dibayar atau sudah dibatalkan")
-
-    is_redeemed = (booking.status == "REDEEMED")
-    return {
-        "status": "success",
-        "valid": not is_redeemed,
-        "is_redeemed": is_redeemed,
-        "message": "Tiket SUDAH DIGUNAKAN sebelumnya!" if is_redeemed else "Tiket VALID & siap ditukarkan",
-        "data": {
-            "id": booking.id,
-            "order_id": booking.order_id,
-            "ticket_code": booking.ticket_code or booking.order_id,
-            "nama_paket": booking.paket.nama if booking.paket else "Paket Wisata",
-            "nama_pemesan": booking.user.nama_lengkap if booking.user else "-",
-            "email_pemesan": booking.user.email if booking.user else "-",
-            "jumlah_orang": booking.jumlah_orang,
-            "tanggal_pakai": f"{booking.tanggal_mulai}" + (f" s/d {booking.tanggal_akhir}" if booking.tanggal_akhir else ""),
-            "status": "Terpakai" if is_redeemed else "Aktif",
-            "redeemed_at": booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if booking.redeemed_at else None,
-            "redeemed_by": booking.redeemed_by,
+        is_redeemed = (booking.status == "REDEEMED")
+        return {
+            "status": "success",
+            "kategori": "PAKET",
+            "valid": not is_redeemed,
+            "is_redeemed": is_redeemed,
+            "message": "Tiket SUDAH DIGUNAKAN sebelumnya!" if is_redeemed else "Tiket VALID & siap ditukarkan",
+            "data": {
+                "id": booking.id,
+                "kategori": "PAKET",
+                "order_id": booking.order_id,
+                "ticket_code": booking.ticket_code or booking.order_id,
+                "nama_paket": booking.paket.nama if booking.paket else "Paket Wisata",
+                "nama_pemesan": booking.user.nama_lengkap if booking.user else "-",
+                "email_pemesan": booking.user.email if booking.user else "-",
+                "jumlah_orang": booking.jumlah_orang,
+                "tanggal_pakai": f"{booking.tanggal_mulai}" + (f" s/d {booking.tanggal_akhir}" if booking.tanggal_akhir else ""),
+                "status": "Terpakai" if is_redeemed else "Aktif",
+                "redeemed_at": booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if booking.redeemed_at else None,
+                "redeemed_by": booking.redeemed_by,
+            }
         }
-    }
+
+    # 2. Cek di tabel Kuliner Order
+    kuliner_order = db.query(models.KulinerOrderModel).filter(
+        (models.KulinerOrderModel.ticket_code == code) | (models.KulinerOrderModel.order_id == code)
+    ).first()
+
+    if kuliner_order:
+        if kuliner_order.status not in ["PAID", "REDEEMED"]:
+            raise HTTPException(status_code=400, detail=f"Tiket Kuliner berstatus {kuliner_order.status}")
+
+        try:
+            items_list = json.loads(kuliner_order.items) if isinstance(kuliner_order.items, str) else kuliner_order.items
+        except Exception:
+            items_list = []
+
+        total_qty = sum(int(item.get("qty", 1)) for item in items_list) if items_list else 1
+        nama_items_ringkas = ", ".join([f"{item.get('nama', 'Menu')} (x{item.get('qty', 1)})" for item in items_list]) if items_list else "Menu Kuliner Wapit"
+
+        is_redeemed = (kuliner_order.status == "REDEEMED")
+        return {
+            "status": "success",
+            "kategori": "KULINER",
+            "valid": not is_redeemed,
+            "is_redeemed": is_redeemed,
+            "message": "Tiket Kuliner SUDAH DIGUNAKAN sebelumnya!" if is_redeemed else "Tiket Kuliner VALID & siap ditukarkan",
+            "data": {
+                "id": kuliner_order.id,
+                "kategori": "KULINER",
+                "order_id": kuliner_order.order_id,
+                "ticket_code": kuliner_order.ticket_code,
+                "nama_paket": nama_items_ringkas,
+                "nama_pemesan": kuliner_order.user.nama_lengkap if kuliner_order.user else "Pelanggan Kuliner",
+                "email_pemesan": kuliner_order.user.email if kuliner_order.user else "-",
+                "jumlah_orang": total_qty,
+                "total_harga": kuliner_order.total_harga,
+                "items": items_list,
+                "tanggal_pakai": "Berlaku Hari Ini",
+                "status": "Terpakai" if is_redeemed else "Aktif",
+                "redeemed_at": kuliner_order.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if kuliner_order.redeemed_at else None,
+                "redeemed_by": kuliner_order.redeemed_by,
+            }
+        }
+
+    raise HTTPException(status_code=404, detail="Kode tiket tidak ditemukan / tidak terdaftar!")
 
 @app.post("/api/tickets/redeem")
 def redeem_ticket(
@@ -2243,47 +2397,101 @@ def redeem_ticket(
     if not code:
         raise HTTPException(status_code=400, detail="Kode tiket tidak boleh kosong")
 
-    booking = db.query(models.BookingModel).filter(
-        (models.BookingModel.ticket_code == code) | (models.BookingModel.order_id == code)
-    ).first()
-
-    if not booking:
-        raise HTTPException(status_code=404, detail="Kode tiket tidak ditemukan!")
-
-    if booking.status == "REDEEMED":
-        tgl_redeem = booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if booking.redeemed_at else "sebelumnya"
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Tiket SUDAH DIGUNAKAN pada {tgl_redeem} oleh {booking.redeemed_by or 'Petugas'}!"
-        )
-
-    if booking.status != "PAID":
-        raise HTTPException(status_code=400, detail=f"Tiket tidak dapat digunakan karena status: {booking.status}")
-
     # Ambil nama petugas jika mengirim Bearer token
     staff_user = get_optional_current_user(request, db)
     staff_name = staff_user.nama_lengkap if staff_user else "Petugas Loket Wapit"
 
-    # Ubah status jadi REDEEMED
-    booking.status = "REDEEMED"
-    booking.redeemed_at = datetime.utcnow()
-    booking.redeemed_by = staff_name
-    db.commit()
-    db.refresh(booking)
+    # 1. Cek di tabel Booking (Paket Wisata)
+    booking = db.query(models.BookingModel).filter(
+        (models.BookingModel.ticket_code == code) | (models.BookingModel.order_id == code)
+    ).first()
 
-    return {
-        "status": "success",
-        "message": "Tiket BERHASIL diverifikasi & ditukarkan!",
-        "data": {
-            "id": booking.id,
-            "order_id": booking.order_id,
-            "ticket_code": booking.ticket_code or booking.order_id,
-            "nama_paket": booking.paket.nama if booking.paket else "Paket Wisata",
-            "nama_pemesan": booking.user.nama_lengkap if booking.user else "-",
-            "jumlah_orang": booking.jumlah_orang,
-            "tanggal_pakai": f"{booking.tanggal_mulai}" + (f" s/d {booking.tanggal_akhir}" if booking.tanggal_akhir else ""),
-            "status": "Terpakai",
-            "redeemed_at": booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB"),
-            "redeemed_by": booking.redeemed_by,
+    if booking:
+        if booking.status == "REDEEMED":
+            tgl_redeem = booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if booking.redeemed_at else "sebelumnya"
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Tiket SUDAH DIGUNAKAN pada {tgl_redeem} oleh {booking.redeemed_by or 'Petugas'}!"
+            )
+
+        if booking.status != "PAID":
+            raise HTTPException(status_code=400, detail=f"Tiket tidak dapat digunakan karena status: {booking.status}")
+
+        # Ubah status jadi REDEEMED
+        booking.status = "REDEEMED"
+        booking.redeemed_at = datetime.utcnow()
+        booking.redeemed_by = staff_name
+        db.commit()
+        db.refresh(booking)
+
+        return {
+            "status": "success",
+            "kategori": "PAKET",
+            "message": "Tiket BERHASIL diverifikasi & ditukarkan!",
+            "data": {
+                "id": booking.id,
+                "kategori": "PAKET",
+                "order_id": booking.order_id,
+                "ticket_code": booking.ticket_code or booking.order_id,
+                "nama_paket": booking.paket.nama if booking.paket else "Paket Wisata",
+                "nama_pemesan": booking.user.nama_lengkap if booking.user else "-",
+                "jumlah_orang": booking.jumlah_orang,
+                "tanggal_pakai": f"{booking.tanggal_mulai}" + (f" s/d {booking.tanggal_akhir}" if booking.tanggal_akhir else ""),
+                "status": "Terpakai",
+                "redeemed_at": booking.redeemed_at.strftime("%d-%m-%Y %H:%M WIB"),
+                "redeemed_by": booking.redeemed_by,
+            }
         }
-    }
+
+    # 2. Cek di tabel Kuliner Order
+    kuliner_order = db.query(models.KulinerOrderModel).filter(
+        (models.KulinerOrderModel.ticket_code == code) | (models.KulinerOrderModel.order_id == code)
+    ).first()
+
+    if kuliner_order:
+        if kuliner_order.status == "REDEEMED":
+            tgl_redeem = kuliner_order.redeemed_at.strftime("%d-%m-%Y %H:%M WIB") if kuliner_order.redeemed_at else "sebelumnya"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tiket Kuliner SUDAH DIGUNAKAN pada {tgl_redeem} oleh {kuliner_order.redeemed_by or 'Petugas'}!"
+            )
+
+        if kuliner_order.status != "PAID":
+            raise HTTPException(status_code=400, detail=f"Tiket Kuliner tidak dapat digunakan karena status: {kuliner_order.status}")
+
+        try:
+            items_list = json.loads(kuliner_order.items) if isinstance(kuliner_order.items, str) else kuliner_order.items
+        except Exception:
+            items_list = []
+
+        total_qty = sum(int(item.get("qty", 1)) for item in items_list) if items_list else 1
+        nama_items_ringkas = ", ".join([f"{item.get('nama', 'Menu')} (x{item.get('qty', 1)})" for item in items_list]) if items_list else "Menu Kuliner Wapit"
+
+        kuliner_order.status = "REDEEMED"
+        kuliner_order.redeemed_at = datetime.utcnow()
+        kuliner_order.redeemed_by = staff_name
+        db.commit()
+        db.refresh(kuliner_order)
+
+        return {
+            "status": "success",
+            "kategori": "KULINER",
+            "message": "Pesanan Kuliner BERHASIL diverifikasi & diserahkan!",
+            "data": {
+                "id": kuliner_order.id,
+                "kategori": "KULINER",
+                "order_id": kuliner_order.order_id,
+                "ticket_code": kuliner_order.ticket_code,
+                "nama_paket": nama_items_ringkas,
+                "nama_pemesan": kuliner_order.user.nama_lengkap if kuliner_order.user else "Pelanggan Kuliner",
+                "jumlah_orang": total_qty,
+                "total_harga": kuliner_order.total_harga,
+                "items": items_list,
+                "tanggal_pakai": "Berlaku Hari Ini",
+                "status": "Terpakai",
+                "redeemed_at": kuliner_order.redeemed_at.strftime("%d-%m-%Y %H:%M WIB"),
+                "redeemed_by": kuliner_order.redeemed_by,
+            }
+        }
+
+    raise HTTPException(status_code=404, detail="Kode tiket tidak ditemukan!")

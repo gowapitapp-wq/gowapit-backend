@@ -131,4 +131,19 @@ class PesanModel(Base):
     nama = Column(String, nullable=False)
     email = Column(String, nullable=False)
     isi_pesan = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class KulinerOrderModel(Base):
+    __tablename__ = "kuliner_order"
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    order_id    = Column(String, unique=True, index=True, nullable=False)
+    ticket_code = Column(String, unique=True, index=True, nullable=False)  # WPTK-YYYYMMDD-XXXXXXXX
+    items       = Column(Text, nullable=False)                              # JSON: [{nama, qty, harga, kedai}]
+    total_harga = Column(Integer, nullable=False)
+    status      = Column(String, default="PAID")                           # PAID | REDEEMED
+    redeemed_at = Column(DateTime, nullable=True)
+    redeemed_by = Column(String, nullable=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("UserModel", backref="kuliner_orders", foreign_keys=[user_id])
