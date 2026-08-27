@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: gowapit-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: JWT_SECRET_KEY
+        value: RAHASIA_WAPIT_KITA
+      - key: MIDTRANS_SERVER_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "*"
