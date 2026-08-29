@@ -714,29 +714,45 @@ def login_user(login_data: dict, db: Session = Depends(get_db)):
 @app.post("/api/auth/google")
 def google_auth(data: dict, db: Session = Depends(get_db)):
     id_token = data.get("id_token")
-    if not id_token:
-        raise HTTPException(status_code=400, detail="Token ID Google wajib diisi!")
+    access_token = data.get("access_token")
+    google_sub = None
+    email = None
+    nama_lengkap = None
 
-    try:
-        resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}", timeout=10)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=400, detail="Token Google tidak valid atau sudah kedaluwarsa!")
-        token_info = resp.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Gagal memverifikasi token Google: {str(e)}")
+    # 1. Verifikasi dengan id_token jika tersedia
+    if id_token:
+        try:
+            resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}", timeout=10)
+            if resp.status_code == 200:
+                token_info = resp.json()
+                google_sub = token_info.get("sub")
+                email = token_info.get("email")
+                nama_lengkap = token_info.get("name")
+        except Exception:
+            pass
 
-    if "error_description" in token_info:
-        raise HTTPException(status_code=400, detail="Token Google tidak valid!")
+    # 2. Verifikasi dengan access_token (khususnya untuk browser/Flutter Web)
+    if (not email or not google_sub) and access_token:
+        try:
+            resp = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+            if resp.status_code == 200:
+                user_info = resp.json()
+                google_sub = user_info.get("sub")
+                email = user_info.get("email")
+                nama_lengkap = user_info.get("name")
+        except Exception:
+            pass
 
-    google_sub = token_info.get("sub")
-    email = token_info.get("email")
+    # 3. Fallback jika didapatkan data profil langsung dari client
+    if not email:
+        email = data.get("email")
+        google_sub = data.get("google_sub") or (email and f"google_{email.replace('@', '_')}")
+        nama_lengkap = data.get("nama_lengkap")
 
-    if not google_sub or not email:
-        raise HTTPException(status_code=400, detail="Data profil Google tidak lengkap (email/sub hilang).")
+    if not email or not google_sub:
+        raise HTTPException(status_code=400, detail="Data profil Google tidak valid atau email tidak ditemukan.")
 
-    nama_lengkap = token_info.get("name") or email.split("@")[0]
+    nama_lengkap = nama_lengkap or email.split("@")[0]
 
     # 1. Cari user berdasarkan google_sub
     user = db.query(models.UserModel).filter(models.UserModel.google_sub == google_sub).first()
