@@ -11,7 +11,9 @@ from typing import Optional, List
 import uuid
 import jwt
 import requests
+import redis as redis_lib
 from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -22,6 +24,49 @@ import models
 from database import engine, SessionLocal
 
 import bcrypt
+
+# --- REDIS CACHE INITIALIZATION ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+redis_client = None
+try:
+    if REDIS_URL:
+        redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+        redis_client.ping()
+        print("Redis cache connected successfully!")
+except Exception as e:
+    redis_client = None
+    print(f"Redis cache not available (fallback to DB): {e}")
+
+def redis_get(key: str) -> Optional[str]:
+    if not redis_client:
+        return None
+    try:
+        return redis_client.get(key)
+    except Exception:
+        return None
+
+def redis_set(key: str, value: str, ttl: int):
+    if redis_client:
+        try:
+            redis_client.set(key, value, ex=ttl)
+        except Exception:
+            pass
+
+def redis_delete(key: str):
+    if redis_client:
+        try:
+            redis_client.delete(key)
+        except Exception:
+            pass
+
+def redis_delete_prefix(prefix: str):
+    if redis_client:
+        try:
+            keys = redis_client.keys(f"{prefix}*")
+            if keys:
+                redis_client.delete(*keys)
+        except Exception:
+            pass
 
 # --- SETUP HASHING PASSWORD ---
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -534,6 +579,16 @@ def read_root():
 
 @app.get("/api/destinasi")
 def get_destinasi(db: Session = Depends(get_db)):
+    cached = redis_get("cache:destinasi")
+    if cached is not None:
+        try:
+            return JSONResponse(
+                content=json.loads(cached),
+                headers={"Cache-Control": "public, max-age=900"}
+            )
+        except Exception:
+            pass
+
     wisata = db.query(models.DestinasiModel).all()
     stats = db.query(
         models.UlasanModel.destinasi_id,
@@ -564,7 +619,9 @@ def get_destinasi(db: Session = Depends(get_db)):
             "rating": st["rating"],
             "jumlah_ulasan": st["jumlah_ulasan"]
         })
-    return {"status": "success", "data": data}
+    payload = {"status": "success", "data": data}
+    redis_set("cache:destinasi", json.dumps(payload), 900)
+    return JSONResponse(content=payload, headers={"Cache-Control": "public, max-age=900"})
 
 # --- HELPER REFERRAL CODE & REWARDS ---
 def generate_unique_referral_code(nama_lengkap: str, db: Session) -> str:
@@ -949,6 +1006,16 @@ def get_ulasan_destinasi(
     curr_user = get_optional_current_user(request, db)
     curr_user_id = curr_user.id if curr_user else None
 
+    cached_str = redis_get(f"cache:ulasan:{destinasi_id}")
+    if cached_str is not None:
+        try:
+            cached_data = json.loads(cached_str)
+            for item in cached_data:
+                item["milik_saya"] = (curr_user_id is not None and item.get("user_id") == curr_user_id)
+            return {"status": "success", "data": cached_data}
+        except Exception:
+            pass
+
     ulasan_list = db.query(models.UlasanModel).filter(
         models.UlasanModel.destinasi_id == destinasi_id
     ).order_by(models.UlasanModel.created_at.desc()).all()
@@ -969,8 +1036,12 @@ def get_ulasan_destinasi(
             "balasan_by": u.balasan_by,
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "updated_at": u.updated_at.isoformat() if u.updated_at else None,
-            "milik_saya": (curr_user_id is not None and u.user_id == curr_user_id)
+            "milik_saya": False
         })
+    redis_set(f"cache:ulasan:{destinasi_id}", json.dumps(data), 180)
+
+    for item in data:
+        item["milik_saya"] = (curr_user_id is not None and item.get("user_id") == curr_user_id)
     return {"status": "success", "data": data}
 
 @app.post("/api/destinasi/{destinasi_id}/ulasan")
@@ -999,6 +1070,8 @@ def create_or_update_ulasan(
         existing.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(existing)
+        redis_delete_prefix("cache:destinasi")
+        redis_delete(f"cache:ulasan:{destinasi_id}")
         return {
             "status": "success",
             "message": "Ulasan berhasil diperbarui!",
@@ -1026,6 +1099,8 @@ def create_or_update_ulasan(
         db.add(baru)
         db.commit()
         db.refresh(baru)
+        redis_delete_prefix("cache:destinasi")
+        redis_delete(f"cache:ulasan:{destinasi_id}")
         return {
             "status": "success",
             "message": "Ulasan berhasil ditambahkan!",
@@ -1067,6 +1142,8 @@ def update_ulasan(
     existing.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(existing)
+    redis_delete_prefix("cache:destinasi")
+    redis_delete(f"cache:ulasan:{destinasi_id}")
     return {
         "status": "success",
         "message": "Ulasan berhasil diperbarui!",
@@ -1098,6 +1175,8 @@ def delete_ulasan(
 
     db.delete(existing)
     db.commit()
+    redis_delete_prefix("cache:destinasi")
+    redis_delete(f"cache:ulasan:{destinasi_id}")
     return {"status": "success", "message": "Ulasan berhasil dihapus!"}
 
 class BalasanUlasanRequest(BaseModel):
@@ -1123,6 +1202,8 @@ def reply_ulasan(
     ulasan.balasan_by = admin.nama_lengkap or "Pengelola Go Wapit"
     db.commit()
     db.refresh(ulasan)
+    redis_delete_prefix("cache:destinasi")
+    redis_delete(f"cache:ulasan:{destinasi_id}")
 
     return {
         "status": "success",
@@ -1153,6 +1234,8 @@ def delete_reply_ulasan(
     ulasan.balasan_at = None
     ulasan.balasan_by = None
     db.commit()
+    redis_delete_prefix("cache:destinasi")
+    redis_delete(f"cache:ulasan:{destinasi_id}")
 
     return {"status": "success", "message": "Balasan berhasil dihapus!"}
 
@@ -1207,6 +1290,16 @@ def update_user_profile(
 
 @app.get("/api/paket")
 def get_paket(db: Session = Depends(get_db)):
+    cached = redis_get("cache:paket")
+    if cached is not None:
+        try:
+            return JSONResponse(
+                content=json.loads(cached),
+                headers={"Cache-Control": "public, max-age=86400"}
+            )
+        except Exception:
+            pass
+
     data_paket = db.query(models.PaketModel).all()
     result = []
     for p in data_paket:
@@ -1216,7 +1309,9 @@ def get_paket(db: Session = Depends(get_db)):
             "harga": p.harga,
             "fasilitas": p.fasilitas
         })
-    return {"status": "success", "data": result}
+    payload = {"status": "success", "data": result}
+    redis_set("cache:paket", json.dumps(payload), 86400)
+    return JSONResponse(content=payload, headers={"Cache-Control": "public, max-age=86400"})
 
 @app.get("/api/kuliner")
 def get_kuliner(kedai: str = None, db: Session = Depends(get_db)):
@@ -1228,8 +1323,20 @@ def get_kuliner(kedai: str = None, db: Session = Depends(get_db)):
 
 @app.get("/api/layanan-umum")
 def get_layanan(db: Session = Depends(get_db)):
+    cached = redis_get("cache:layanan-umum")
+    if cached is not None:
+        try:
+            return JSONResponse(
+                content=json.loads(cached),
+                headers={"Cache-Control": "public, max-age=604800"}
+            )
+        except Exception:
+            pass
+
     data_layanan = db.query(models.LayananUmumModel).all()
-    return {"status": "success", "data": data_layanan}
+    payload = {"status": "success", "data": data_layanan}
+    redis_set("cache:layanan-umum", json.dumps(payload, default=str), 604800)
+    return JSONResponse(content=payload, headers={"Cache-Control": "public, max-age=604800"})
 
 # --- KONFIGURASI PENGIRIMAN EMAIL (HUBUNGI KAMI) ---
 def get_env_flexible(key: str, default: str = "") -> str:
@@ -1593,13 +1700,26 @@ def get_slot_paket(
     if (akhir - mulai).days > 90:
         akhir = mulai + timedelta(days=89)
 
+    cache_key = f"cache:slot:{paket_id}:{mulai.isoformat()}:{akhir.isoformat()}"
+    cached = redis_get(cache_key)
+    if cached is not None:
+        try:
+            return JSONResponse(
+                content=json.loads(cached),
+                headers={"Cache-Control": "public, max-age=60"}
+            )
+        except Exception:
+            pass
+
     hasil = {}
     cur = mulai
     while cur <= akhir:
         hasil[cur.isoformat()] = _hitung_slot(paket_id, cur.isoformat(), db)
         cur += timedelta(days=1)
 
-    return {"status": "success", "paket_id": paket_id, "data": hasil}
+    payload = {"status": "success", "paket_id": paket_id, "data": hasil}
+    redis_set(cache_key, json.dumps(payload), 60)
+    return JSONResponse(content=payload, headers={"Cache-Control": "public, max-age=60"})
 
 # ============================================================
 # ============================================================
@@ -1798,6 +1918,7 @@ def create_voucher(
     db.add(voucher)
     db.commit()
     db.refresh(voucher)
+    redis_delete_prefix("cache:voucher")
     return {"status": "success", "message": "Voucher berhasil dibuat!", "data": {"id": voucher.id, "kode": voucher.kode}}
 
 class VoucherUpdateRequest(BaseModel):
@@ -1838,10 +1959,11 @@ def update_voucher(
     if req.aktif is not None:
         voucher.aktif = req.aktif
     if req.user_id is not None:
-        voucher.user_id = req.user_id if req.user_id > 0 else None
+        voucher.user_id = req.user_id
 
     db.commit()
     db.refresh(voucher)
+    redis_delete_prefix("cache:voucher")
     return {"status": "success", "message": "Voucher berhasil diperbarui!"}
 
 @app.delete("/api/vouchers/{voucher_id}")
@@ -1855,6 +1977,7 @@ def delete_voucher(
         raise HTTPException(status_code=404, detail="Voucher tidak ditemukan")
     db.delete(voucher)
     db.commit()
+    redis_delete_prefix("cache:voucher")
     return {"status": "success", "message": "Voucher berhasil dihapus!"}
 
 @app.get("/api/user/vouchers")
@@ -1896,37 +2019,65 @@ def get_voucher(
     subtotal: int = 0,
     db: Session = Depends(get_db)
 ):
-    voucher = db.query(models.VoucherModel).filter(
-        models.VoucherModel.kode == kode.upper()
-    ).first()
-    if not voucher:
-        raise HTTPException(status_code=404, detail="Kode voucher tidak ditemukan")
-    if not voucher.aktif:
-        raise HTTPException(status_code=400, detail="Voucher sudah tidak aktif")
-    if voucher.kuota > 0 and voucher.terpakai >= voucher.kuota:
-        raise HTTPException(status_code=400, detail="Kuota voucher sudah habis")
+    kode_clean = kode.upper()
+    cached = redis_get(f"cache:voucher:{kode_clean}")
+    v_data = None
+    if cached is not None:
+        try:
+            v_data = json.loads(cached)
+        except Exception:
+            pass
 
-    if voucher.user_id is not None:
-        curr_user = get_optional_current_user(request, db) if request else None
-        if not curr_user or curr_user.id != voucher.user_id:
-            raise HTTPException(status_code=400, detail="Voucher ini khusus untuk pemilik akun yang ditentukan")
+    if not v_data:
+        voucher = db.query(models.VoucherModel).filter(
+            models.VoucherModel.kode == kode_clean
+        ).first()
+        if not voucher:
+            raise HTTPException(status_code=404, detail="Kode voucher tidak ditemukan")
+        if not voucher.aktif:
+            raise HTTPException(status_code=400, detail="Voucher sudah tidak aktif")
+        if voucher.kuota > 0 and voucher.terpakai >= voucher.kuota:
+            raise HTTPException(status_code=400, detail="Kuota voucher sudah habis")
 
-    if voucher.tipe == "persen":
-        diskon = int(subtotal * voucher.nilai / 100)
-        if voucher.maks_diskon:
-            diskon = min(diskon, voucher.maks_diskon)
-    else:  # nominal
-        diskon = voucher.nilai
-
-    diskon = min(diskon, subtotal)  # tidak bisa melebihi subtotal
-    return {
-        "status": "success",
-        "data": {
+        v_data = {
             "id": voucher.id,
             "kode": voucher.kode,
             "tipe": voucher.tipe,
             "nilai": voucher.nilai,
             "maks_diskon": voucher.maks_diskon,
+            "kuota": voucher.kuota,
+            "terpakai": voucher.terpakai,
+            "aktif": voucher.aktif,
+            "user_id": voucher.user_id
+        }
+        redis_set(f"cache:voucher:{kode_clean}", json.dumps(v_data), 300)
+    else:
+        if not v_data.get("aktif"):
+            raise HTTPException(status_code=400, detail="Voucher sudah tidak aktif")
+        if v_data.get("kuota", 0) > 0 and v_data.get("terpakai", 0) >= v_data.get("kuota", 0):
+            raise HTTPException(status_code=400, detail="Kuota voucher sudah habis")
+
+    if v_data.get("user_id") is not None:
+        curr_user = get_optional_current_user(request, db) if request else None
+        if not curr_user or curr_user.id != v_data.get("user_id"):
+            raise HTTPException(status_code=400, detail="Voucher ini khusus untuk pemilik akun yang ditentukan")
+
+    if v_data.get("tipe") == "persen":
+        diskon = int(subtotal * v_data.get("nilai", 0) / 100)
+        if v_data.get("maks_diskon"):
+            diskon = min(diskon, v_data.get("maks_diskon"))
+    else:  # nominal
+        diskon = v_data.get("nilai", 0)
+
+    diskon = min(diskon, subtotal)
+    return {
+        "status": "success",
+        "data": {
+            "id": v_data.get("id"),
+            "kode": v_data.get("kode"),
+            "tipe": v_data.get("tipe"),
+            "nilai": v_data.get("nilai"),
+            "maks_diskon": v_data.get("maks_diskon"),
             "diskon": diskon,
             "total": subtotal - diskon
         }
@@ -2051,6 +2202,11 @@ def buat_booking(
     db.commit()
     db.refresh(booking)
 
+    # Invalidate cache slot dan voucher setelah booking dibuat
+    redis_delete_prefix("cache:slot")
+    if req.voucher_kode:
+        redis_delete(f"cache:voucher:{req.voucher_kode.strip().upper()}")
+
     return {
         "status": "success",
         "message": "Booking berhasil dibuat!",
@@ -2130,6 +2286,8 @@ def cancel_booking(
 
     booking.status = "CANCELLED"
     db.commit()
+    redis_delete_prefix("cache:slot")
+    redis_delete_prefix("cache:voucher")
     return {"status": "success", "message": "Booking berhasil dibatalkan"}
 
 @app.post("/api/booking/{booking_id}/pay")
