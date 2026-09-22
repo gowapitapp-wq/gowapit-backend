@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, Float
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -8,13 +8,14 @@ class UserModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     nama_lengkap = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
-    password = Column(String, nullable=False)
+    password = Column(String, nullable=True)
     foto_profil = Column(Text, nullable=True)
     google_sub = Column(String, nullable=True)
     facebook_id = Column(String, nullable=True)
     role = Column(String, default="user")
     referral_code = Column(String, unique=True, index=True, nullable=True)
     referred_by   = Column(Integer, ForeignKey("users.id"), nullable=True)
+    firebase_uid  = Column(String, unique=True, index=True, nullable=True)
 
 class DestinasiModel(Base):
     __tablename__ = "destinasi"
@@ -31,6 +32,8 @@ class DestinasiModel(Base):
     # Jarak dan ketinggian bisa dibiarkan atau dihapus jika sudah tidak dipakai
     jarak = Column(String, nullable=True) 
     ketinggian = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
 
 class UlasanModel(Base):
     __tablename__ = "ulasan"

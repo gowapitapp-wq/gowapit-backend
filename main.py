@@ -9,6 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone, date as date_type
 from typing import Optional, List
 import uuid
+import urllib.parse
 import jwt
 import requests
 import redis as redis_lib
@@ -97,12 +98,93 @@ def get_password_hash(password: str) -> str:
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
 
-# --- SETUP JWT SECRET (Kunci Rahasia) ---
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "RAHASIA_WAPIT_KITA")
-ALGORITHM = "HS256"
-security = HTTPBearer() # Skema keamanan untuk membaca token "Bearer" dari Flutter
+# --- FIREBASE ADMIN INITIALIZATION & FAIL-CLOSED ENVIRONMENT CHECK ---
+try:
+    import firebase_admin
+    from firebase_admin import auth as fb_auth, credentials as fb_credentials
+    FIREBASE_INSTALLED = True
+except ImportError:
+    FIREBASE_INSTALLED = False
+
+APP_ENV = os.getenv("APP_ENV", "dev").lower()
+IS_PROD_ENVIRONMENT = bool(os.getenv("RENDER") or os.getenv("RAILWAY_HOSTNAME") or os.getenv("RAILWAY_ENVIRONMENT") or APP_ENV == "production")
+FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+firebase_app = None
+
+if FIREBASE_INSTALLED:
+    if FIREBASE_SERVICE_ACCOUNT_JSON:
+        try:
+            if os.path.isfile(FIREBASE_SERVICE_ACCOUNT_JSON):
+                cred = fb_credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_JSON)
+            else:
+                sa_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+                cred = fb_credentials.Certificate(sa_dict)
+            firebase_app = firebase_admin.initialize_app(cred)
+            print("Firebase Admin SDK initialized successfully via service account.")
+        except Exception as e:
+            if IS_PROD_ENVIRONMENT:
+                raise RuntimeError(f"CRITICAL: Failed to initialize Firebase Admin SDK in production ({e})")
+            print(f"Warning: Failed to initialize Firebase Admin SDK in dev: {e}")
+    else:
+        if IS_PROD_ENVIRONMENT:
+            raise RuntimeError(
+                "CRITICAL: FIREBASE_SERVICE_ACCOUNT_JSON is required in production environments. Startup aborted (fail-closed)."
+            )
+        print("Notice: Running in local dev without FIREBASE_SERVICE_ACCOUNT_JSON. Dev mock token mode active.")
+else:
+    if IS_PROD_ENVIRONMENT:
+        raise RuntimeError("CRITICAL: firebase-admin is not installed in production environment.")
+    print("Notice: firebase-admin not installed. Running in dev mock mode.")
+
+security = HTTPBearer(auto_error=False) # Skema keamanan untuk membaca token "Bearer" dari Flutter
+
+def verify_firebase_token(token: str) -> dict:
+    if firebase_app and FIREBASE_INSTALLED:
+        try:
+            return fb_auth.verify_id_token(token)
+        except Exception as e:
+            raise HTTPException(status_code=401, detail=f"Token Firebase tidak valid atau kedaluwarsa: {str(e)}")
+    elif APP_ENV == "dev" and not IS_PROD_ENVIRONMENT:
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+            return {
+                "uid": unverified.get("user_id") or unverified.get("sub") or unverified.get("uid") or f"dev_{token[:12]}",
+                "email": unverified.get("email", "dev@gowapit.com"),
+                "name": unverified.get("name", "Dev User"),
+                "picture": unverified.get("picture"),
+                "email_verified": unverified.get("email_verified", True)
+            }
+        except Exception:
+            return {
+                "uid": f"dev_{token[:16]}",
+                "email": "dev@gowapit.com",
+                "name": "Dev User",
+                "picture": None,
+                "email_verified": True
+            }
+    else:
+        raise HTTPException(status_code=500, detail="Layanan autentikasi Firebase belum terkonfigurasi di server.")
 
 models.Base.metadata.create_all(bind=engine)
+
+# --- KONSTANTA KOORDINAT DESTINASI & BOUNDING BOX KAWASAN WAPIT ---
+KAWASAN_BBOX = {
+    "lat_min": -7.6,
+    "lat_max": -7.0,
+    "lon_min": 109.9,
+    "lon_max": 110.4
+}
+
+DESTINASI_KOORDINAT = {
+    "Makam Ki Jumprit": {"lat": -7.2562, "lon": 110.0188},
+    "Hutan Pinus Umbul Jumprit": {"lat": -7.2558, "lon": 110.0183},
+    "Mata Air Umbul Jumprit": {"lat": -7.2565, "lon": 110.0179},
+    "Interaksi dengan Monyet": {"lat": -7.2552, "lon": 110.0185},
+    "Flying Fox Dewasa": {"lat": -7.2548, "lon": 110.0175},
+    "Flying Fox Anak": {"lat": -7.2545, "lon": 110.0178},
+    "High Rope": {"lat": -7.2550, "lon": 110.0170},
+    "Tari Wedok Tegowanuh": {"lat": -7.2560, "lon": 110.0192},
+}
 
 # Auto Migration Kolom Database (Kompatibel SQLite & Postgres)
 def run_db_migrations():
@@ -308,7 +390,56 @@ def run_db_migrations():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """))
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE users ADD COLUMN firebase_uid TEXT"))
             conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE destinasi ADD COLUMN latitude FLOAT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE destinasi ADD COLUMN longitude FLOAT"))
+            conn.commit()
+    except Exception:
+        pass
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            import logging
+            for name, coords in DESTINASI_KOORDINAT.items():
+                lat, lon = coords["lat"], coords["lon"]
+                if (KAWASAN_BBOX["lat_min"] <= lat <= KAWASAN_BBOX["lat_max"] and 
+                    KAWASAN_BBOX["lon_min"] <= lon <= KAWASAN_BBOX["lon_max"]):
+                    conn.execute(
+                        text("UPDATE destinasi SET latitude = :lat, longitude = :lon WHERE name = :name AND latitude IS NULL"),
+                        {"lat": lat, "lon": lon, "name": name}
+                    )
+                else:
+                    logging.warning(f"Koordinat destinasi '{name}' di luar KAWASAN_BBOX, dilewati: lat={lat}, lon={lon}")
+            conn.commit()
+
+            # Pengecekan destinasi tanpa koordinat
+            null_rows = conn.execute(text("SELECT name FROM destinasi WHERE latitude IS NULL OR longitude IS NULL")).fetchall()
+            for row in null_rows:
+                logging.warning(f"Destinasi tanpa koordinat terdeteksi di database: {row[0]}")
     except Exception:
         pass
 
@@ -346,56 +477,72 @@ def seeder_awal():
                 kategori="Sejarah", 
                 deskripsi_pendek="Destinasi ziarah tenang penjelajah sejarah dan budaya lokal di area mata air utama.", 
                 deskripsi_panjang="Destinasi ziarah bersejarah yang tenang di dekat mata air utama. Ramai dikunjungi peziarah untuk mendoakan leluhur sekaligus memperdalam wawasan sejarah dan budaya lokal.", 
-                image="assets/images/MakamKiJumprit.jpeg"
+                image="assets/images/MakamKiJumprit.jpeg",
+                latitude=-7.2562,
+                longitude=110.0188
             ),
             models.DestinasiModel(
                 name="Hutan Pinus Umbul Jumprit", 
                 kategori="Alam", 
                 deskripsi_pendek="Kawasan hutan asri di kaki Gunung Sindoro yang sejuk dengan jajaran pinus menjulang tinggi.", 
                 deskripsi_panjang="Terhampar indah di kaki Gunung Sindoro dengan jajaran pohon pinus yang menjulang tinggi kokoh. Menyuguhkan panorama alam yang asri, berudara sejuk, dan menyegarkan pikiran.", 
-                image="assets/images/HutanPinus.jpeg"
+                image="assets/images/HutanPinus.jpeg",
+                latitude=-7.2558,
+                longitude=110.0183
             ),
             models.DestinasiModel(
                 name="Mata Air Umbul Jumprit", 
                 kategori="Alam", 
                 deskripsi_pendek="Sumber mata air abadi yang jernih, disucikan, dan menjadi hulu Sungai Progo.", 
                 deskripsi_panjang="Sumber mata air abadi yang disucikan dan bernilai spiritual kuat. Airnya sangat jernih kebiruan, tidak pernah kering meski kemarau, dan menjadi hulu penting bagi Sungai Progo.", 
-                image="assets/images/MataAirSuci.jpeg"
+                image="assets/images/MataAirSuci.jpeg",
+                latitude=-7.2565,
+                longitude=110.0179
             ),
             models.DestinasiModel(
                 name="Interaksi dengan Monyet", 
                 kategori="Satwa", 
                 deskripsi_pendek="Pengalaman tak terlupakan berinteraksi langsung dengan kawanan kera ekor panjang yang ramah.", 
                 deskripsi_panjang="Nikmati keseruan berinteraksi langsung dengan kawanan kera ekor panjang yang ramah. Kehadiran satwa eksotis ini menjadi daya tarik unik yang melengkapi petualangan Anda di hutan pinus.", 
-                image="assets/images/InteraksiDenganMonyet.jpg"
+                image="assets/images/InteraksiDenganMonyet.jpg",
+                latitude=-7.2552,
+                longitude=110.0185
             ),
             models.DestinasiModel(
                 name="Flying Fox Dewasa", 
                 kategori="Wahana", 
                 deskripsi_pendek="Wahana luncur gantung penantang adrenalin dengan pemandangan indah Hutan Pinus Wapit dari ketinggian.", 
                 deskripsi_panjang="Pacu adrenalin Anda dengan meluncur di wahana Flying Fox! Rasakan sensasi mendebarkan yang membakar semangat sembari menikmati keindahan hijau Hutan Pinus Wapit dari ketinggian.", 
-                image="assets/images/FlyingFox.jpeg"
+                image="assets/images/FlyingFox.jpeg",
+                latitude=-7.2548,
+                longitude=110.0175
             ),
             models.DestinasiModel(
                 name="Flying Fox Anak", 
                 kategori="Wahana", 
                 deskripsi_pendek="Area meluncur yang aman untuk melatih keberanian dan kemandirian si kecil.", 
                 deskripsi_panjang="Wahana meluncur yang dirancang khusus dan aman untuk anak-anak. Pilihan sempurna untuk liburan keluarga yang berkesan sekaligus melatih keberanian serta kemandirian si kecil.", 
-                image="assets/images/FlyingFoxAnak.jpeg"
+                image="assets/images/FlyingFoxAnak.jpeg",
+                latitude=-7.2545,
+                longitude=110.0178
             ),
             models.DestinasiModel(
                 name="High Rope", 
                 kategori="Wahana", 
                 deskripsi_pendek="Uji keberanian dan keseimbangan di atas jembatan gantung tinggi yang memacu adrenalin.", 
                 deskripsi_panjang="Uji mental, keseimbangan, dan ketangkasan Anda di wahana tali tinggi. Berjalan di atas jembatan gantung ketinggian akan memberikan sensasi liburan menantang yang memuaskan.", 
-                image="assets/images/HighRope.jpg"
+                image="assets/images/HighRope.jpg",
+                latitude=-7.2550,
+                longitude=110.0170
             ),
             models.DestinasiModel(
                 name="Tari Wedok Tegowanuh", 
                 kategori="Budaya", 
                 deskripsi_pendek="Tari Wedok Tegowanuh merupakan tarian khas Kaloran, Temanggung, yang rutin ditampilkan di Wisata Wapit.", 
                 deskripsi_panjang="Tari Wedok Tegowanuh merupakan tarian khas Kaloran, Temanggung, yang rutin ditampilkan di Wisata Wapit (Wisata Alam Umbul Jumprit) sebagai upaya melestarikan warisan budaya sekaligus menarik minat wisatawan.", 
-                image="assets/images/Tari.jpeg"
+                image="assets/images/Tari.jpeg",
+                latitude=-7.2560,
+                longitude=110.0192
             ),
         ])
         db.commit()
@@ -616,6 +763,8 @@ def get_destinasi(db: Session = Depends(get_db)):
             "image": w.image,
             "jarak": w.jarak,
             "ketinggian": w.ketinggian,
+            "latitude": w.latitude,
+            "longitude": w.longitude,
             "rating": st["rating"],
             "jumlah_ulasan": st["jumlah_ulasan"]
         })
@@ -686,285 +835,36 @@ def apply_referral_rewards(referee: models.UserModel, referrer: models.UserModel
         "referrer_voucher": {"kode": voucher_referrer.kode, "tipe": voucher_referrer.tipe, "nilai": voucher_referrer.nilai}
     }
 
-@app.post("/api/register")
-def register_user(user_data: dict, db: Session = Depends(get_db)):
-    if not user_data.get("email") or not user_data.get("password") or not user_data.get("nama_lengkap"):
-        raise HTTPException(status_code=400, detail="Semua field wajib diisi!")
+# --- AUTENTIKASI FIREBASE DEPENDENCY & ENDPOINT ---
 
-    user_exists = db.query(models.UserModel).filter(models.UserModel.email == user_data["email"].strip().lower()).first()
-    if user_exists:
-        raise HTTPException(status_code=400, detail="Email sudah digunakan!")
-
-    my_referral_code = generate_unique_referral_code(user_data["nama_lengkap"], db)
-    hashed_pwd = get_password_hash(user_data["password"])
-    
-    referrer = None
-    input_ref = user_data.get("referral_code") or user_data.get("kode_referral")
-    if input_ref and str(input_ref).strip():
-        ref_clean = str(input_ref).strip().upper()
-        referrer = db.query(models.UserModel).filter(func.upper(models.UserModel.referral_code) == ref_clean).first()
-        if not referrer:
-            raise HTTPException(status_code=400, detail="Kode referral yang Anda masukkan tidak ditemukan!")
-
-    baru = models.UserModel(
-        nama_lengkap=user_data["nama_lengkap"],
-        email=user_data["email"].strip().lower(),
-        password=hashed_pwd,
-        role="user",
-        referral_code=my_referral_code,
-        referred_by=referrer.id if referrer else None
-    )
-    db.add(baru)
-    db.commit()
-    db.refresh(baru)
-
-    rewards_data = None
-    if referrer:
-        rewards_data = apply_referral_rewards(baru, referrer, db)
-
-    return {
-        "status": "success",
-        "message": "Akun berhasil dibuat!",
-        "user_id": baru.id,
-        "referral_code": baru.referral_code,
-        "referral_rewards": rewards_data
-    }
-
-@app.post("/api/login")
-def login_user(login_data: dict, db: Session = Depends(get_db)):
-    if not login_data.get("email") or not login_data.get("password"):
-        raise HTTPException(status_code=400, detail="Email dan password wajib diisi!")
-
-    user = db.query(models.UserModel).filter(models.UserModel.email == login_data["email"].strip().lower()).first()
-    
-    if not user or not verify_password(login_data["password"], user.password):
-        raise HTTPException(status_code=400, detail="Email atau password salah!")
-    
-    if not user.referral_code:
-        user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
-        db.commit()
-        db.refresh(user)
-
-    # 1. Buat masa berlaku token (aktif 7 hari)
-    expire = datetime.now(timezone.utc) + timedelta(days=7)
-    
-    # 2. Bungkus email user dan waktu expired ke dalam token
-    to_encode = {"sub": user.email, "exp": expire}
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    
-    # 3. Kirim kembali access_token ke Flutter
-    return {
-        "status": "success", 
-        "message": "Login berhasil!", 
-        "access_token": encoded_jwt,
-        "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "nama_lengkap": user.nama_lengkap,
-            "email": user.email,
-            "role": user.role or "user",
-            "referral_code": user.referral_code,
-            "referred_by": user.referred_by
-        }
-    }
-
-@app.post("/api/auth/google")
-def google_auth(data: dict, db: Session = Depends(get_db)):
-    id_token = data.get("id_token")
-    access_token = data.get("access_token")
-    google_sub = None
-    email = None
-    nama_lengkap = None
-
-    # 1. Verifikasi dengan id_token jika tersedia
-    if id_token:
-        try:
-            resp = requests.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}", timeout=10)
-            if resp.status_code == 200:
-                token_info = resp.json()
-                google_sub = token_info.get("sub")
-                email = token_info.get("email")
-                nama_lengkap = token_info.get("name")
-        except Exception:
-            pass
-
-    # 2. Verifikasi dengan access_token (khususnya untuk browser/Flutter Web)
-    if (not email or not google_sub) and access_token:
-        try:
-            resp = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
-            if resp.status_code == 200:
-                user_info = resp.json()
-                google_sub = user_info.get("sub")
-                email = user_info.get("email")
-                nama_lengkap = user_info.get("name")
-        except Exception:
-            pass
-
-    # 3. Fallback jika didapatkan data profil langsung dari client
-    if not email:
-        email = data.get("email")
-        google_sub = data.get("google_sub") or (email and f"google_{email.replace('@', '_')}")
-        nama_lengkap = data.get("nama_lengkap")
-
-    if not email or not google_sub:
-        raise HTTPException(status_code=400, detail="Data profil Google tidak valid atau email tidak ditemukan.")
-
-    nama_lengkap = nama_lengkap or email.split("@")[0]
-
-    # 1. Cari user berdasarkan google_sub
-    user = db.query(models.UserModel).filter(models.UserModel.google_sub == google_sub).first()
-
-    # 2. Jika belum ada, cari berdasarkan email lalu tautkan google_sub
-    if not user:
-        user = db.query(models.UserModel).filter(models.UserModel.email == email.strip().lower()).first()
-        if user:
-            user.google_sub = google_sub
-            if not user.referral_code:
-                user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
-            db.commit()
-            db.refresh(user)
-
-    # 3. Jika tetap belum ada, buat user baru
-    if not user:
-        random_pwd = get_password_hash(uuid.uuid4().hex)
-        user = models.UserModel(
-            nama_lengkap=nama_lengkap,
-            email=email.strip().lower(),
-            password=random_pwd,
-            google_sub=google_sub,
-            role="user",
-            referral_code=generate_unique_referral_code(nama_lengkap, db)
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-    expire = datetime.now(timezone.utc) + timedelta(days=7)
-    to_encode = {"sub": user.email, "exp": expire}
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-    return {
-        "status": "success",
-        "message": "Login Google berhasil!",
-        "access_token": encoded_jwt,
-        "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "nama_lengkap": user.nama_lengkap,
-            "email": user.email,
-            "role": user.role or "user",
-            "referral_code": user.referral_code,
-            "referred_by": user.referred_by
-        }
-    }
-
-@app.post("/api/auth/facebook")
-def facebook_auth(data: dict, db: Session = Depends(get_db)):
-    access_token = data.get("access_token")
-    facebook_id = data.get("facebook_id")
-    email = data.get("email")
-    nama_lengkap = data.get("nama_lengkap") or data.get("name")
-    foto_profil = data.get("foto_profil") or data.get("picture")
-
-    # Jika access_token diberikan dan bukan mock/test, coba verifikasi ke Facebook Graph API
-    if access_token and not str(access_token).startswith("mock_") and not str(access_token).startswith("test_"):
-        try:
-            resp = requests.get(
-                f"https://graph.facebook.com/me?fields=id,name,email,picture.type(large)&access_token={access_token}",
-                timeout=10
-            )
-            if resp.status_code == 200:
-                fb_info = resp.json()
-                facebook_id = fb_info.get("id") or facebook_id
-                nama_lengkap = fb_info.get("name") or nama_lengkap
-                email = fb_info.get("email") or email
-                if not foto_profil and fb_info.get("picture", {}).get("data", {}).get("url"):
-                    foto_profil = fb_info["picture"]["data"]["url"]
-            elif not facebook_id:
-                raise HTTPException(status_code=400, detail="Token Facebook tidak valid atau sudah kedaluwarsa!")
-        except HTTPException:
-            raise
-        except Exception as e:
-            if not facebook_id:
-                raise HTTPException(status_code=400, detail=f"Gagal memverifikasi token Facebook: {str(e)}")
-
-    if not facebook_id and not email:
-        raise HTTPException(status_code=400, detail="ID Facebook atau Email wajib disertakan.")
-
-    # Jika email tidak tersedia dari Facebook, gunakan fallback email berbasis Facebook ID
-    if not email:
-        email = f"fb_{facebook_id}@facebook.gowapit.id"
-    if not nama_lengkap:
-        nama_lengkap = "Pengguna Facebook"
-
-    # 1. Cari user berdasarkan facebook_id
-    user = None
-    if facebook_id:
-        user = db.query(models.UserModel).filter(models.UserModel.facebook_id == str(facebook_id)).first()
-
-    # 2. Jika belum ketemu, cari berdasarkan email lalu tautkan facebook_id
-    if not user and email:
-        user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
-        if user:
-            if facebook_id:
-                user.facebook_id = str(facebook_id)
-            if foto_profil and not user.foto_profil:
-                user.foto_profil = foto_profil
-            if not user.referral_code:
-                user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
-            db.commit()
-            db.refresh(user)
-
-    # 3. Jika tetap belum ada, buat user baru
-    if not user:
-        random_pwd = get_password_hash(uuid.uuid4().hex)
-        user = models.UserModel(
-            nama_lengkap=nama_lengkap,
-            email=email,
-            password=random_pwd,
-            facebook_id=str(facebook_id) if facebook_id else None,
-            foto_profil=foto_profil,
-            role="user",
-            referral_code=generate_unique_referral_code(nama_lengkap, db)
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-    expire = datetime.now(timezone.utc) + timedelta(days=7)
-    to_encode = {"sub": user.email, "exp": expire}
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-    return {
-        "status": "success",
-        "message": "Login Facebook berhasil!",
-        "access_token": encoded_jwt,
-        "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "nama_lengkap": user.nama_lengkap,
-            "email": user.email,
-            "foto_profil": user.foto_profil,
-            "role": user.role or "user",
-            "referral_code": user.referral_code,
-            "referred_by": user.referred_by
-        }
-    }
-
-# Fungsi/middleware untuk memvalidasi token JWT
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security), db: Session = Depends(get_db)) -> models.UserModel:
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Token autentikasi tidak ditemukan")
     token = credentials.credentials
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Token tidak valid")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Token tidak valid atau kedaluwarsa")
-    
-    user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+    decoded = verify_firebase_token(token)
+
+    fb_uid = decoded.get("uid")
+    email = (decoded.get("email") or "").strip().lower()
+    email_verified = decoded.get("email_verified", False)
+
+    if not fb_uid:
+        raise HTTPException(status_code=401, detail="Token Firebase tidak memiliki UID yang valid")
+
+    # 1. Lookup berdasarkan firebase_uid
+    user = db.query(models.UserModel).filter(models.UserModel.firebase_uid == fb_uid).first()
+
+    # 2. Jika belum ada firebase_uid, cari berdasarkan email HANYA JIKA email_verified is True
+    if not user and email:
+        if email_verified:
+            user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+            if user:
+                user.firebase_uid = fb_uid
+                db.commit()
+                db.refresh(user)
+
     if user is None:
-        raise HTTPException(status_code=401, detail="User tidak ditemukan")
+        raise HTTPException(status_code=401, detail="Pengguna belum terdaftar di sistem. Silakan selesaikan proses autentikasi.")
+
     return user
 
 def require_admin(current_user: models.UserModel = Depends(get_current_user)):
@@ -972,20 +872,142 @@ def require_admin(current_user: models.UserModel = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Akses ditolak: Hanya admin yang memiliki hak akses.")
     return current_user
 
-# Helper untuk token opsional pada endpoint publik (misal GET ulasan)
 def get_optional_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[models.UserModel]:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
     token = auth_header.split(" ")[1]
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if not email:
+        decoded = verify_firebase_token(token)
+        fb_uid = decoded.get("uid")
+        email = (decoded.get("email") or "").strip().lower()
+        email_verified = decoded.get("email_verified", False)
+        if not fb_uid:
             return None
-        return db.query(models.UserModel).filter(models.UserModel.email == email).first()
+        user = db.query(models.UserModel).filter(models.UserModel.firebase_uid == fb_uid).first()
+        if not user and email and email_verified:
+            user = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+            if user:
+                user.firebase_uid = fb_uid
+                db.commit()
+                db.refresh(user)
+        return user
     except Exception:
         return None
+
+class FirebaseAuthSyncRequest(BaseModel):
+    nama_lengkap: Optional[str] = None
+    referral_code: Optional[str] = None
+    kode_referral: Optional[str] = None
+    foto_profil: Optional[str] = None
+
+@app.post("/api/auth/firebase")
+def firebase_auth_sync(
+    req_data: FirebaseAuthSyncRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db)
+):
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Token autentikasi Firebase wajib disertakan pada header Authorization")
+
+    token = credentials.credentials
+    decoded = verify_firebase_token(token)
+
+    fb_uid = decoded.get("uid")
+    email = (decoded.get("email") or "").strip().lower()
+    email_verified = decoded.get("email_verified", False)
+    name_from_token = decoded.get("name")
+    nama_lengkap = req_data.nama_lengkap or name_from_token or (email.split("@")[0] if email else "Pengguna Wapit")
+    foto_profil = req_data.foto_profil or decoded.get("picture")
+    if not foto_profil and email:
+        clean_name = nama_lengkap or email.split("@")[0]
+        foto_profil = f"https://ui-avatars.com/api/?name={urllib.parse.quote(clean_name)}&background=1E524D&color=ffffff&size=256&bold=true"
+
+    if not fb_uid:
+        raise HTTPException(status_code=400, detail="Token Firebase tidak memiliki UID yang valid")
+
+    # 1. Cari berdasarkan firebase_uid
+    user = db.query(models.UserModel).filter(models.UserModel.firebase_uid == fb_uid).first()
+
+    # 2. Jika belum ada firebase_uid, cari berdasarkan email
+    if not user and email:
+        existing_by_email = db.query(models.UserModel).filter(models.UserModel.email == email).first()
+        if existing_by_email:
+            if not email_verified:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Email ini sudah terdaftar. Harap verifikasi email Anda di Firebase terlebih dahulu sebelum menghubungkan akun."
+                )
+            # Tautkan firebase_uid
+            existing_by_email.firebase_uid = fb_uid
+            if foto_profil and not existing_by_email.foto_profil:
+                existing_by_email.foto_profil = foto_profil
+            if not existing_by_email.referral_code:
+                existing_by_email.referral_code = generate_unique_referral_code(existing_by_email.nama_lengkap, db)
+            try:
+                db.commit()
+                db.refresh(existing_by_email)
+            except Exception:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="Konflik data saat menautkan akun.")
+            user = existing_by_email
+
+    # 3. Jika user baru, buat di database
+    rewards_data = None
+    if not user:
+        input_ref = req_data.referral_code or req_data.kode_referral
+        referrer = None
+        if input_ref and str(input_ref).strip():
+            ref_clean = str(input_ref).strip().upper()
+            referrer = db.query(models.UserModel).filter(func.upper(models.UserModel.referral_code) == ref_clean).first()
+            if not referrer:
+                raise HTTPException(status_code=400, detail="Kode referral yang Anda masukkan tidak ditemukan!")
+
+        my_ref_code = generate_unique_referral_code(nama_lengkap, db)
+        user = models.UserModel(
+            nama_lengkap=nama_lengkap,
+            email=email or f"{fb_uid}@firebase.gowapit.id",
+            firebase_uid=fb_uid,
+            role="user",
+            referral_code=my_ref_code,
+            referred_by=referrer.id if referrer else None,
+            foto_profil=foto_profil
+        )
+        try:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        except Exception:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Gagal membuat akun karena konflik data unik.")
+
+        if referrer:
+            rewards_data = apply_referral_rewards(user, referrer, db)
+    else:
+        # Update foto profil jika diberikan baru atau masih kosong
+        if foto_profil and not user.foto_profil:
+            user.foto_profil = foto_profil
+            db.commit()
+        if not user.referral_code:
+            user.referral_code = generate_unique_referral_code(user.nama_lengkap, db)
+            db.commit()
+            db.refresh(user)
+
+    return {
+        "status": "success",
+        "message": "Autentikasi Firebase berhasil!",
+        "user": {
+            "id": user.id,
+            "nama_lengkap": user.nama_lengkap,
+            "email": user.email,
+            "role": user.role or "user",
+            "referral_code": user.referral_code,
+            "referred_by": user.referred_by,
+            "firebase_uid": user.firebase_uid,
+            "foto_profil": user.foto_profil
+        },
+        "referral_rewards": rewards_data
+    }
 
 class UlasanRequest(BaseModel):
     rating: int
@@ -1247,6 +1269,12 @@ class UpdateProfileRequest(BaseModel):
 def get_user_profile(current_user: models.UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
     if not current_user.referral_code:
         current_user.referral_code = generate_unique_referral_code(current_user.nama_lengkap, db)
+        db.commit()
+        db.refresh(current_user)
+
+    if not current_user.foto_profil and current_user.email:
+        clean_name = current_user.nama_lengkap or current_user.email.split("@")[0]
+        current_user.foto_profil = f"https://ui-avatars.com/api/?name={urllib.parse.quote(clean_name)}&background=1E524D&color=ffffff&size=256&bold=true"
         db.commit()
         db.refresh(current_user)
 
